@@ -443,12 +443,6 @@ class BitBangConnection {
         this.flow.open(streamId);
     }
 
-    _advertiseStream(streamId) {
-        if (this.flow.advertise(streamId)) return;
-        this._resetStream(streamId, 'flow_control', 'failed to advertise receive window', true);
-        throw new Error('failed to advertise receive window');
-    }
-
     _sendStreamSYN(streamId, flags, payload) {
         this._openStream(streamId);
         try {
@@ -457,9 +451,6 @@ class BitBangConnection {
             this.flow.resetStream(streamId, e);
             throw e;
         }
-        // Both directions become live with the first SYN. Several stream
-        // types send response DAT without a separate response SYN.
-        this._advertiseStream(streamId);
     }
 
     _applicationBytes(frame) {
