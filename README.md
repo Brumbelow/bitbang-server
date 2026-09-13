@@ -30,8 +30,7 @@ bitbang-server/            ← repo root (this README)
 │   │   └── identity/      UID derivation, signature verification
 │   ├── web/               browser assets (bootstrap.js, sw.js, shims)
 │   └── deploy/            systemd units, env templates, upload scripts
-├── server_instructions.md  nginx + TLS + DNS setup
-└── go_port.md              design notes from the Python → Go port
+└── server_instructions.md  nginx + TLS + DNS setup
 ```
 
 ## Run a local instance
