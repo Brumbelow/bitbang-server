@@ -12,29 +12,58 @@
       python3 -m http.server   then open  config.html?src=config-mock.json
 -->
 <style>
-  :root { color-scheme: light dark; --line:#8883; --dim:#8888; --bad:#c0392b; --ok:#27ae60; }
-  body { font:16px/1.5 system-ui,sans-serif; margin:0; padding:1.5rem; max-width:44rem; }
-  h1 { font-size:1.1rem; font-weight:600; margin:0 0 1rem; }
-  #tabs { display:flex; gap:.25rem; flex-wrap:wrap; border-bottom:1px solid var(--line); margin-bottom:1.25rem; }
-  #tabs button { font:inherit; background:none; border:0; border-bottom:2px solid transparent;
-                 padding:.5rem .75rem; cursor:pointer; color:inherit; opacity:.6; }
-  #tabs button[aria-selected=true] { opacity:1; border-bottom-color:currentColor; }
-  .row { display:grid; grid-template-columns:13rem 1fr; gap:.5rem 1rem;
-         align-items:baseline; padding:.6rem 0; border-bottom:1px solid var(--line); }
-  @media (max-width:32rem) { .row { grid-template-columns:1fr; } }
-  .label { font-weight:500; }
-  .ctl { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+  :root {
+    color-scheme: light dark;
+    /* Conventional stack. system-ui resolves to Cantarell or DejaVu on Linux,
+       which is what made this look unlike a settings page. */
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+            "Helvetica Neue", Arial, sans-serif;
+    --accent: #3b82f6;
+    --dim: #8a8a8e;
+    --line: #8884;
+    --bad: #e5484d;
+    --ok: #30a46c;
+    accent-color: var(--accent);
+  }
+  body { font:15px/1.6 var(--font); margin:0; padding:2rem 1.5rem; max-width:42rem; }
+  h1 { font-size:.8rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+       color:var(--dim); margin:0 0 1.25rem; }
+
+  #tabs { display:flex; gap:1.25rem; flex-wrap:wrap; margin-bottom:1.5rem; }
+  #tabs button { font:inherit; background:none; border:0; padding:0 0 .4rem; cursor:pointer;
+                 color:var(--dim); border-bottom:2px solid transparent; }
+  #tabs button[aria-selected=true] { color:inherit; border-bottom-color:var(--accent); }
+  #tabs button:hover { color:inherit; }
+
+  /* No rules between rows -- spacing separates them, and a settings page that
+     is merely calm reads as deliberate. */
+  .row { display:grid; grid-template-columns:12rem 1fr; gap:.35rem 1.25rem;
+         align-items:baseline; padding:.55rem 0; }
+  @media (max-width:34rem) { .row { grid-template-columns:1fr; } }
+  .label { color:var(--dim); }
+  .ctl { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
+
+  input, select, button.action { font:inherit; color:inherit; background:none;
+    border:1px solid var(--line); border-radius:5px; padding:.3rem .5rem; }
+  input:focus, select:focus, button.action:focus { outline:2px solid var(--accent);
+    outline-offset:1px; border-color:transparent; }
   /* Size the control to the value: a port number does not get a full-width box. */
-  input[type=number] { width:8rem; text-align:right; }
-  input[type=text]   { width:100%; max-width:22rem; }
-  input[type=range]  { width:12rem; }
-  .unit, .bound, .note { color:var(--dim); font-size:.85rem; }
-  .state { font-size:.85rem; min-height:1.2em; }
+  input[type=number] { width:7rem; text-align:right; }
+  input[type=text], input[type=password] { width:100%; max-width:20rem; }
+  input[type=range] { width:11rem; border:0; padding:0; }
+  input[type=checkbox], input[type=radio] { width:auto; border:0; padding:0; }
+  label { display:inline-flex; align-items:center; gap:.3rem; }
+
+  button.action { cursor:pointer; padding:.35rem .9rem; }
+  button.action:hover { border-color:var(--accent); }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+
+  .unit, .bound, .note, .ro { color:var(--dim); font-size:.85rem; }
+  .track { display:inline-flex; align-items:center; gap:.5rem; }
+  .value { font-variant-numeric:tabular-nums; margin-left:.4rem; }
+  .state { font-size:.85rem; color:var(--dim); min-height:1.2em; }
   .state.err { color:var(--bad); }
   .state.ok  { color:var(--ok); }
-  .ro { color:var(--dim); }
-  button.action { font:inherit; padding:.35rem .8rem; cursor:pointer; }
-  button.danger { border-color:var(--bad); color:var(--bad); }
 </style>
 
 <h1>Settings</h1>
@@ -122,8 +151,8 @@ function row(s, all) {
         if (j.min !== undefined) m += ` (${j.min}-${j.max})`;
         say(m, 'err');
       } else {
-        say(j.msg || 'saved', 'ok');
-        setTimeout(() => { if (state.textContent === (j.msg || 'saved')) say(''); }, 1500);
+        say(j.msg || 'applied', 'ok');
+        setTimeout(() => { if (state.textContent === (j.msg || 'applied')) say(''); }, 1500);
         /* Display what came back, not what was sent: a setter may quantize. */
         if ('v' in j && input && input.type !== 'checkbox') input.value = j.v;
         if ('v' in j && input && input.type === 'checkbox') input.checked = !!j.v;
@@ -215,7 +244,13 @@ function row(s, all) {
         t = setTimeout(() => send({ k: s.k, v: Number(input.value) }), 300);
       };
       input.onchange = () => { clearTimeout(t); send({ k: s.k, v: Number(input.value) }); };
-      ctl.append(lo, input, hi, out);
+      /* The bounds travel with the slider; the value stands apart from them,
+         or the max bound and the current value read as one number pair. */
+      const track = document.createElement('span');
+      track.className = 'track';
+      track.append(lo, input, hi);
+      out.className = 'value';
+      ctl.append(track, out);
     } else {
       input.onchange = () => send({ k: s.k, v: Number(input.value) });
       ctl.appendChild(input);
