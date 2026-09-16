@@ -20,6 +20,7 @@ func stampDir(t *testing.T) string {
 		"sw.js":          "const BUILD = '" + buildPlaceholder + "';\n",
 		"ws-shim.js":     "// ws shim\n",
 		"xhr-shim.js":    "// xhr shim\n",
+		"config.html":    "<html><!-- settings --></html>",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -143,5 +144,25 @@ func TestStampedAssetsAreNotCacheable(t *testing.T) {
 		if !strings.Contains(got, "no-store") {
 			t.Errorf("%s: Cache-Control = %q, want no-store", path, got)
 		}
+	}
+}
+
+// The meta-page shell has to be reachable at /__bitbang__/config.html or the
+// service worker's meta-page route returns 502 and the settings page is blank
+// with nothing in the log. allowedBitbangAssets is an explicit whitelist, so
+// forgetting an entry is the likely way that happens.
+func TestMetaPageShellIsServed(t *testing.T) {
+	dir := stampDir(t)
+	w := serveAsset(t, dir, "/__bitbang__/config.html")
+	if w.Code != http.StatusOK {
+		t.Fatalf("config.html: got %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("config.html content type = %q, want text/html", ct)
+	}
+	// Not in the whitelist: a name the SW would reject too, but the server
+	// should not be the thing that lets it through.
+	if w := serveAsset(t, dir, "/__bitbang__/console.html"); w.Code != http.StatusNotFound {
+		t.Errorf("console.html: got %d, want 404 until it is whitelisted", w.Code)
 	}
 }

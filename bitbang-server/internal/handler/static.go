@@ -53,6 +53,7 @@ var stampInputs = []string{
 	"sw.js",
 	"ws-shim.js",
 	"xhr-shim.js",
+	"config.html",
 }
 
 // buildStamp hashes the on-disk bytes of every stamp input, with their
@@ -101,6 +102,7 @@ var allowedBitbangAssets = map[string]bool{
 	"ws-shim.js":   true,
 	"xhr-shim.js":  true,
 	"favicon.ico":  true, // handler internally maps this to favicon.png
+	"config.html":  true, // the device-settings meta-page shell
 }
 
 // Static returns an http.Handler that serves the signaling server's static
