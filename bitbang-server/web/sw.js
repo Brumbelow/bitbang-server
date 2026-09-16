@@ -966,6 +966,9 @@ async function redirectViaActiveSession(event, url) {
 // the server does. The device supplies data and no HTML at all.
 //
 // An allowlist rather than a path: the name arrives from the URL.
+//
+// Temporary: the mechanism stays, but 'config' is hardcoded here only until
+// plugins can register a meta-page, at which point this set is built from them.
 const META_PAGES = new Set(['config']);
 
 async function serveMetaPage(name) {

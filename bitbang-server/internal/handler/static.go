@@ -53,6 +53,7 @@ var stampInputs = []string{
 	"sw.js",
 	"ws-shim.js",
 	"xhr-shim.js",
+	// Temporary: leaves with config.html when the config page becomes a plugin.
 	"config.html",
 }
 
@@ -102,7 +103,8 @@ var allowedBitbangAssets = map[string]bool{
 	"ws-shim.js":   true,
 	"xhr-shim.js":  true,
 	"favicon.ico":  true, // handler internally maps this to favicon.png
-	"config.html":  true, // the device-settings meta-page shell
+	// Temporary: goes away when a plugin serves its own assets.
+	"config.html": true, // the device-settings meta-page shell
 }
 
 // Static returns an http.Handler that serves the signaling server's static

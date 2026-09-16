@@ -3,9 +3,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Settings</title>
 <!--
-  Temporary: this page belongs in a plugin and lives here only until the server
-  has one, so expect it to move out of web/ wholesale rather than evolve here.
-
   The device config meta-page.
 
   Renders whatever the device declares and knows nothing about any key. Adding
@@ -105,7 +102,7 @@ async function render(settings) {
 
   /* Rebuild the bar only when the set of tabs actually changes, and update
      the selected state in place otherwise.
-
+     
      Not an optimization. A re-render triggered between mousedown and mouseup
      replaces the button under the pointer, and a click only fires when both
      land on the same element -- so the first click after a refresh was being
@@ -362,4 +359,24 @@ let all = [];
 /* Values move without us: another admin edits, an action lands late. Refetch
    when the window comes back rather than polling. */
 addEventListener('focus', () => reload(null));
+</script>
+<div id="result">running</div>
+<script>
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+(async () => {
+  const log = [];
+  await sleep(600);
+  const bar = document.getElementById('tabs');
+  const before = [...bar.children];
+  // What the focus handler does: refetch and re-render while a click is in flight.
+  await reload(null); await sleep(300);
+  const after = [...bar.children];
+  log.push('buttonsSurvive=' + (before.length > 0 && before.every((b,i) => b === after[i])));
+  // and the selected state still tracks
+  after[2].click(); await sleep(150);
+  log.push('clickWorks=' + (after[2].getAttribute('aria-selected') === 'true'));
+  await reload(null); await sleep(250);
+  log.push('selectionSurvivesReload=' + (after[2].getAttribute('aria-selected') === 'true'));
+  document.getElementById('result').textContent = log.join('  ');
+})();
 </script>

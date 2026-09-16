@@ -147,6 +147,8 @@ func TestStampedAssetsAreNotCacheable(t *testing.T) {
 	}
 }
 
+// Temporary: goes with config.html when the config page becomes a plugin.
+//
 // The meta-page shell has to be reachable at /__bitbang__/config.html or the
 // service worker's meta-page route returns 502 and the settings page is blank
 // with nothing in the log. allowedBitbangAssets is an explicit whitelist, so

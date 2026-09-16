@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """A stand-in for a device, so the config page can be developed without one.
 
+Temporary: moves out with config.html when the config page becomes a plugin.
+
 Serves the static files and answers /__bitbang/config the way the firmware
 does -- same declaration, same status codes, same error bodies. The page runs
 its real default URL against this, so what gets exercised is the code that

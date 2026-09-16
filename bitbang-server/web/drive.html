@@ -3,9 +3,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Settings</title>
 <!--
-  Temporary: this page belongs in a plugin and lives here only until the server
-  has one, so expect it to move out of web/ wholesale rather than evolve here.
-
   The device config meta-page.
 
   Renders whatever the device declares and knows nothing about any key. Adding
@@ -103,32 +100,18 @@ async function render(settings) {
   const tabs = [...new Set(settings.map(s => s.g || 'Other'))];
   if (!tabs.includes(current)) current = tabs[0];
 
-  /* Rebuild the bar only when the set of tabs actually changes, and update
-     the selected state in place otherwise.
-
-     Not an optimization. A re-render triggered between mousedown and mouseup
-     replaces the button under the pointer, and a click only fires when both
-     land on the same element -- so the first click after a refresh was being
-     swallowed by the focus handler's reload, which fires because that click is
-     what returns focus to the window. */
   const tabBar = document.getElementById('tabs');
-  const shown = [...tabBar.children].map(b => b.textContent);
-  const same = shown.length === tabs.length && shown.every((t, i) => t === tabs[i]);
+  tabBar.textContent = '';
   /* One group means the tab bar is noise. */
-  if (!same) {
-    tabBar.textContent = '';
-    if (tabs.length > 1) {
-      for (const t of tabs) {
-        const b = document.createElement('button');
-        b.textContent = t;
-        b.setAttribute('role', 'tab');
-        b.onclick = () => { current = t; render(settings); };
-        tabBar.appendChild(b);
-      }
+  if (tabs.length > 1) {
+    for (const t of tabs) {
+      const b = document.createElement('button');
+      b.textContent = t;
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', String(t === current));
+      b.onclick = () => { current = t; render(settings); };
+      tabBar.appendChild(b);
     }
-  }
-  for (const b of tabBar.children) {
-    b.setAttribute('aria-selected', String(b.textContent === current));
   }
 
   const panel = document.getElementById('panel');
@@ -362,4 +345,25 @@ let all = [];
 /* Values move without us: another admin edits, an action lands late. Refetch
    when the window comes back rather than polling. */
 addEventListener('focus', () => reload(null));
+</script>
+<div id="result">running</div>
+<script>
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const tab = n => [...document.querySelectorAll('#tabs button')].find(b => b.textContent === n);
+(async () => {
+  const log = [];
+  try {
+    await sleep(600);
+    tab('Logging').click(); await sleep(100);
+    const sel = document.querySelector('#panel select');
+    log.push('initial=' + sel.value);
+    sel.value = 'info'; sel.dispatchEvent(new Event('change'));
+    await sleep(600);
+    log.push('afterSet=' + document.querySelector('#panel select').value);
+    tab('Device').click(); await sleep(150);
+    tab('Logging').click(); await sleep(150);
+    log.push('afterTabRoundTrip=' + document.querySelector('#panel select').value);
+  } catch (e) { log.push('ERR ' + e); }
+  document.getElementById('result').textContent = log.join('  ');
+})();
 </script>
