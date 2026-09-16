@@ -2833,6 +2833,43 @@ class BitBangConnection {
             && n.deviceHash === p.deviceHash;
     }
 
+    // Re-point the iframe at a meta-page instead of reloading, so editing the
+    // fragment to /*config keeps the live session rather than building a new
+    // one -- no second WebRTC connection, no re-verify, no fresh ICE.
+    //
+    // The reload below exists for one failure: a device page that is an SPA,
+    // navigated to the prefixed URL, redirects to a bare origin path the SW
+    // cannot re-route. Neither end of a meta-page trip has that shape. Our own
+    // static page redirects nowhere, and an iframe currently showing one holds
+    // no SPA state to disturb -- so leaving a meta-page is as safe as arriving
+    // at one, which is what makes closing the console cheap too.
+    //
+    // Returns true when it handled the navigation.
+    navigateMetaPageInPlace() {
+        const isMeta = (path) => /^\/\*[A-Za-z0-9_-]+$/.test(path || '');
+        const p = parseDeviceURL();
+        // Same checks as iframeShowsTopURL: a changed code or flag section is
+        // a different session, and no amount of re-pointing makes it this one.
+        if (p.code !== this.code) return false;
+        if (readUrlFlagString() !== this.initialFlagStr) return false;
+
+        const cur = this.iframeDeviceURL();
+        if (!isMeta(p.devicePath) && !isMeta(cur && cur.devicePath)) return false;
+
+        const iframe = document.getElementById('device-frame');
+        if (!iframe) return false;
+        // Only worth it while there is a session to preserve; without one a
+        // reload is the honest answer.
+        if (!this.dataChannel || this.dataChannel.readyState !== 'open') return false;
+
+        this.devicePath = p.devicePath;
+        this.deviceSearch = p.deviceSearch;
+        this.deviceHash = p.deviceHash;
+        iframe.src = `/__device__/${this.sessionId}${p.devicePath}${p.deviceSearch}${p.deviceHash}`;
+        if (this.debug) console.log('[Bootstrap] meta-page nav in place →', p.devicePath);
+        return true;
+    }
+
     // Mirror the iframe's current location into the top-level address bar so
     // refresh/bookmark land back on the same page. The device URL
     // (path?query#hash) rides in the fragment after the access code, so nothing
@@ -3386,6 +3423,9 @@ window.addEventListener('hashchange', () => {
     queueMicrotask(() => {
         const conn = window.__bitbangConnection;
         if (conn && conn.iframeShowsTopURL()) return;   // back/forward restored it; nothing to do
+        // A meta-page can be reached without dropping the session, because the
+        // SPA hazard the reload guards against does not apply to one.
+        if (conn && conn.navigateMetaPageInPlace()) return;
         // Manual address-bar edit (or back/forward to a top entry the iframe
         // isn't showing): reload. A fresh bootstrap re-parses the device URL and
         // rebuilds the iframe with an intact /__device__/ referer chain. We

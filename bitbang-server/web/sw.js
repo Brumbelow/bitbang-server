@@ -754,6 +754,13 @@ function isServerEndpoint(pathname) {
         || pathname.startsWith('/__bitbang__/');
 }
 
+// The canonical spelling of a meta-page, and the same one the address bar
+// shows after the access code: #<code>/*config. Declared above its use in the
+// fetch handler rather than beside serveBareMetaPage below -- a const in the
+// temporal dead zone would still work there, since the listener runs long
+// after this module is evaluated, but that is a subtlety worth not having.
+const BARE_META_PATH = /^\/\*([A-Za-z0-9_-]+)$/;
+
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
     if (url.origin !== self.location.origin) return;
@@ -806,10 +813,48 @@ self.addEventListener('fetch', (event) => {
         }
 
         event.respondWith(proxyToDevice(event));
+    } else if (BARE_META_PATH.test(url.pathname)) {
+        // A link on a device page written the natural way -- href="/*config"
+        // -- arrives with no /__device__/<sid> prefix, because an
+        // origin-absolute href discards the current path. The prefixed form
+        // above never sees it, and without this the request is proxied to the
+        // device, which 404s a path it has never heard of.
+        event.respondWith(serveBareMetaPage(event, url));
     } else {
         event.respondWith(proxyAbsolutePath(event, url));
     }
 });
+
+// Serve a meta-page for a bare /*name, but only on concrete evidence that this
+// request belongs to a device session -- a referer or client URL carrying an
+// actual /__device__/<sid>.
+//
+// Concrete specifically, not findSession: that falls back to fuzzy strategies
+// (single-session, most-recent), and on one of those a stray top-level visit to
+// bitba.ng/*config would render a settings shell bound to whatever session
+// another tab happened to have open.
+//
+// Anything unproven falls through to proxyAbsolutePath, which is exactly what
+// happened before this existed -- so the failure mode of this route is the old
+// behavior rather than a new one.
+async function serveBareMetaPage(event, url) {
+    const name = url.pathname.match(BARE_META_PATH)[1];
+    await sessionsReady;
+
+    const fromReferer = (event.request.referrer || '').match(/\/__device__\/([^/]+)/);
+    let sid = fromReferer && fromReferer[1];
+    if (!sid && event.clientId) {
+        // A navigation may carry no referer; the initiating client's own URL
+        // is the other concrete handle.
+        const client = await self.clients.get(event.clientId);
+        const m = client && client.url.match(/\/__device__\/([^/]+)/);
+        sid = m && m[1];
+    }
+    if (!sid || !sessions.has(sid)) {
+        return proxyAbsolutePath(event, url);
+    }
+    return serveMetaPage(name);
+}
 
 // isLikelyAppPopup: does this URL look like a popup from a proxied app
 // rather than a legitimate bitba.ng navigation? Excludes only paths that
@@ -973,7 +1018,12 @@ const META_PAGES = new Set(['config']);
 
 async function serveMetaPage(name) {
     if (!META_PAGES.has(name)) {
-        return new Response(`no meta-page named "${name}"`, {
+        // Name what does exist. This is the error someone meets first --
+        // guessing a name that sounds plausible is exactly how you find out
+        // which ones are real -- and a bare refusal makes them go read source
+        // to learn there is only one.
+        const have = [...META_PAGES].sort().join(', ');
+        return new Response(`no meta-page named "${name}" (have: ${have})`, {
             status: 404,
             headers: { 'Content-Type': 'text/plain; charset=utf-8' },
         });
