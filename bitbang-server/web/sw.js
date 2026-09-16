@@ -960,10 +960,17 @@ async function proxyAbsolutePath(event, url) {
         if (event.request.mode !== 'navigate') {
             reqInit.mode = event.request.mode;
         }
-        // Requests with a body need the duplex option
+        // Requests with a body need the duplex option, and a browser without
+        // Request.body (Firefox) has none to hand over: read the bytes here
+        // instead, or the copy below carries no body at all and a form submit
+        // through this path arrives empty.
         if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
-            reqInit.body = event.request.body;
-            reqInit.duplex = 'half';
+            if (event.request.body) {
+                reqInit.body = event.request.body;
+                reqInit.duplex = 'half';
+            } else {
+                reqInit.body = await event.request.arrayBuffer();
+            }
         }
         const proxyEvent = {
             request: new Request(deviceUrl, reqInit),
