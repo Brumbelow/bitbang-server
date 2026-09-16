@@ -787,6 +787,24 @@ self.addEventListener('fetch', (event) => {
         // available later, once xhr-shim has stripped the prefix away.
         const m = url.pathname.match(/^\/__device__\/([^/]+)/);
         if (m && sessions.has(m[1])) rememberClientSession(event, m[1]);
+
+        // A '*' first segment names a meta-page rather than a device path:
+        // #<code>/*config. The shell is ours; only the data it renders comes
+        // from the device.
+        //
+        // It is served *inside* /__device__/<sid>/ on purpose. The routing
+        // rules below match on the requesting client's URL, so a plain
+        // fetch('/__bitbang/config') from this page is proxied to the device
+        // like any device page's fetch -- which means the page itself needs
+        // no knowledge of sessions, prefixes, or that it is a meta-page at
+        // all. Serve the same file from the bare origin and its fetches would
+        // reach the signaling server instead.
+        const meta = url.pathname.match(/^\/__device__\/[^/]+\/\*([A-Za-z0-9_-]+)$/);
+        if (meta) {
+            event.respondWith(serveMetaPage(meta[1]));
+            return;
+        }
+
         event.respondWith(proxyToDevice(event));
     } else {
         event.respondWith(proxyAbsolutePath(event, url));
@@ -942,6 +960,36 @@ async function redirectViaActiveSession(event, url) {
  *
  * If no session is found, the request passes through to the signaling server.
  */
+// Meta-pages the server serves on a device's behalf. A page compiled into
+// firmware freezes its UI at the moment it was flashed, so fixing a rendering
+// bug would mean an OTA to every device in the field; a meta-page updates when
+// the server does. The device supplies data and no HTML at all.
+//
+// An allowlist rather than a path: the name arrives from the URL.
+const META_PAGES = new Set(['config']);
+
+async function serveMetaPage(name) {
+    if (!META_PAGES.has(name)) {
+        return new Response(`no meta-page named "${name}"`, {
+            status: 404,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
+    }
+    // A fetch issued from inside a service worker does not re-enter its own
+    // fetch handler, so this reaches the network normally.
+    const r = await fetch(`/__bitbang__/${name}.html`, { cache: 'no-cache' });
+    if (!r.ok) {
+        return new Response(`meta-page "${name}" is not deployed`, {
+            status: 502,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
+    }
+    return new Response(r.body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+}
+
 async function proxyAbsolutePath(event, url) {
     const sessionId = await findSession(event);
     if (sessionId) {
