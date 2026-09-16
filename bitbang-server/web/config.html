@@ -100,18 +100,32 @@ async function render(settings) {
   const tabs = [...new Set(settings.map(s => s.g || 'Other'))];
   if (!tabs.includes(current)) current = tabs[0];
 
+  /* Rebuild the bar only when the set of tabs actually changes, and update
+     the selected state in place otherwise.
+
+     Not an optimization. A re-render triggered between mousedown and mouseup
+     replaces the button under the pointer, and a click only fires when both
+     land on the same element -- so the first click after a refresh was being
+     swallowed by the focus handler's reload, which fires because that click is
+     what returns focus to the window. */
   const tabBar = document.getElementById('tabs');
-  tabBar.textContent = '';
+  const shown = [...tabBar.children].map(b => b.textContent);
+  const same = shown.length === tabs.length && shown.every((t, i) => t === tabs[i]);
   /* One group means the tab bar is noise. */
-  if (tabs.length > 1) {
-    for (const t of tabs) {
-      const b = document.createElement('button');
-      b.textContent = t;
-      b.setAttribute('role', 'tab');
-      b.setAttribute('aria-selected', String(t === current));
-      b.onclick = () => { current = t; render(settings); };
-      tabBar.appendChild(b);
+  if (!same) {
+    tabBar.textContent = '';
+    if (tabs.length > 1) {
+      for (const t of tabs) {
+        const b = document.createElement('button');
+        b.textContent = t;
+        b.setAttribute('role', 'tab');
+        b.onclick = () => { current = t; render(settings); };
+        tabBar.appendChild(b);
+      }
     }
+  }
+  for (const b of tabBar.children) {
+    b.setAttribute('aria-selected', String(b.textContent === current));
   }
 
   const panel = document.getElementById('panel');
@@ -158,7 +172,14 @@ function row(s, all) {
       } else {
         say(j.msg || 'applied', 'ok');
         setTimeout(() => { if (state.textContent === (j.msg || 'applied')) say(''); }, 1500);
-        /* Display what came back, not what was sent: a setter may quantize. */
+        /* Display what came back, not what was sent: a setter may quantize.
+           And write it into the declaration, not only into the control --
+           switching tabs re-renders from that array, so a DOM-only update
+           looks right until you leave the tab and come back to the old
+           value. */
+        if ('v' in j) s.v = j.v;
+        if ('set' in j) s.set = j.set;
+        if ('pv' in j) s.pv = j.pv; else delete s.pv;
         if ('v' in j && input && input.type !== 'checkbox') input.value = j.v;
         if ('v' in j && input && input.type === 'checkbox') input.checked = !!j.v;
         if (out) out.textContent = j.v;

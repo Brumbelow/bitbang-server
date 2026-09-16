@@ -333,6 +333,9 @@ class BitBangConnection {
         this.target = (devicePath || '/').split('/').filter(Boolean)[0] || '';
         this.deviceSearch = deviceSearch || '';
         this.deviceHash = deviceHash || '';
+        // Streams this page has asked the device for. Cleared when the data
+        // channel opens, since the device knows nothing of a previous one.
+        this.subscribedStreams = new Set();
         this.code = code || '';
         // Snapshot the URL's `!<flags>` section at session start. If the
         // user edits the code or the flag section in the address bar,
@@ -1299,6 +1302,7 @@ class BitBangConnection {
             this.dataChannel = event.channel;
             this.dataChannel.binaryType = 'arraybuffer';  // SWSP uses binary frames
             this.dataChannel.onopen = () => {
+                this.subscribedStreams.clear();
                 console.log('DataChannel opened');
                 // Bidirectional verify: do not send "connect" yet. The
                 // device's first stream-0 frame must be verify_nonce_hash
@@ -2851,9 +2855,45 @@ class BitBangConnection {
         history.replaceState(null, '', top);
     }
 
+    // Tell the device whether this page wants a stream.
+    //
+    // It goes on stream 0, not on the stream's own channel: a media channel is
+    // maxRetransmits 0, so a subscribe sent there can vanish and leave the
+    // viewer silently blank. Named, so audio uses the same message.
+    setStream(name, on) {
+        if (!name || !this.dataChannel || this.dataChannel.readyState !== 'open') return;
+        try {
+            this.dataChannel.send(this.createFrame(0, FLAG_SYN,
+                JSON.stringify({ type: 'stream', name, on: !!on })));
+            if (on) this.subscribedStreams.add(name);
+            else this.subscribedStreams.delete(name);
+        } catch (e) {
+            if (this.debug) console.warn('[Bootstrap] setStream failed', e);
+        }
+    }
+
     wireStreams(iframe) {
         const doc = iframe.contentDocument;
         if (!doc) return;
+
+        // A device declares its stream channels on every session, so without
+        // this the device cannot tell a page that renders video from one that
+        // merely connected -- and it sends to both, halving the frame rate of
+        // the page that actually wanted it. The settings meta-page declares no
+        // sinks and so asks for nothing.
+        //
+        // Scanned once, when the page loads. A page that builds its DOM later
+        // calls __bitbang.subscribe() itself; watching the document for
+        // changes would be more code, permanently running, for a case a
+        // load-time scan could not have served reliably anyway.
+        const wanted = new Set();
+        doc.querySelectorAll('[data-bitbang-stream]').forEach(el => {
+            const n = el.getAttribute('data-bitbang-stream');
+            if (n) wanted.add(n);
+        });
+        for (const n of wanted) {
+            if (!this.subscribedStreams.has(n)) this.setStream(n, true);
+        }
 
         // Wire elements with data-bitbang-stream attribute
         doc.querySelectorAll('[data-bitbang-stream]').forEach(el => {
@@ -2869,6 +2909,9 @@ class BitBangConnection {
 
         // Expose __bitbang to iframe
         iframe.contentWindow.__bitbang = {
+            // For a page that renders after load: subscribe when it mounts.
+            subscribe: (name) => this.setStream(name, true),
+            unsubscribe: (name) => this.setStream(name, false),
             streams: this.resolvedStreams,
             getStream: (name) => this.resolvedStreams[name],
             getDefaultStream: () => this.resolvedStreams[Object.keys(this.resolvedStreams)[0]],
