@@ -45,6 +45,11 @@
 
   input, select, button.action { font:inherit; color:inherit; background:none;
     border:1px solid var(--line); border-radius:5px; padding:.3rem .5rem; }
+  /* Canvas and CanvasText follow color-scheme, so this is right in both
+     themes. A transparent select inherits white text while the browser paints
+     the option list on its own default background -- white on white until a
+     row is highlighted. */
+  select, option { background:Canvas; color:CanvasText; }
   input:focus, select:focus, button.action:focus { outline:2px solid var(--accent);
     outline-offset:1px; border-color:transparent; }
   /* Size the control to the value: a port number does not get a full-width box. */
