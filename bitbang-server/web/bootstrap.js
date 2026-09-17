@@ -1409,7 +1409,17 @@ class BitBangConnection {
     _monitorRelayPath(pc) {
         this._clearRelayMonitor();
         const tick = async () => {
-            if (!this.pc || this.pc !== pc || pc.connectionState !== 'connected') return;
+            // Only a replaced or discarded connection ends the monitor. A
+            // transient 'disconnected' must not: the state flaps on any blip
+            // and recovers, and returning here without rescheduling left the
+            // monitor dead for the rest of the session -- with _usingRelay
+            // frozen at whatever it was, which is usually true, because the
+            // relay pair wins first and the direct pair is nominated after.
+            if (!this.pc || this.pc !== pc) return;
+            if (pc.connectionState !== 'connected') {
+                this._relayMonitorTimer = setTimeout(tick, 2000);
+                return;
+            }
             const now = await this._isUsingRelay(pc);
             if (now !== this._usingRelay) {
                 this._usingRelay = now;
@@ -1584,6 +1594,12 @@ class BitBangConnection {
                 return;
             }
             this._turnEnded = true;
+            // Not behind the debug flag. This fires at most once per session
+            // and only while tearing the page down, which is exactly the
+            // moment evidence is worth having -- "it said relay and I was not
+            // on a relay" is otherwise unfalsifiable after the fact.
+            console.warn('[Bootstrap] ending session on relay expiry;',
+                         'selected pairs:', await this._describeSelectedPairs(this.pc));
             this.showReloadScreen(this._endedMessage());
         };
         if (endAt > 0) {
@@ -1596,6 +1612,34 @@ class BitBangConnection {
 
     _endedMessage() {
         return 'Relay session ended. Reload to continue.';
+    }
+
+    // What _isUsingRelay is actually looking at, in a form a person can read.
+    // Kept beside it so the two cannot drift: if this says every pair is host
+    // and the session still ended on relay expiry, the fault is in the caller
+    // rather than in the stats.
+    async _describeSelectedPairs(pc) {
+        const out = [];
+        try {
+            const stats = await pc.getStats();
+            for (const [, report] of stats) {
+                if (report.type !== 'transport' || !report.selectedCandidatePairId) continue;
+                const pair = stats.get(report.selectedCandidatePairId);
+                if (!pair) { out.push('transport with no pair'); continue; }
+                const local = stats.get(pair.localCandidateId);
+                const remote = stats.get(pair.remoteCandidateId);
+                out.push({
+                    local: local?.candidateType,
+                    remote: remote?.candidateType,
+                    state: pair.state,
+                    nominated: pair.nominated,
+                    bytes: (pair.bytesSent || 0) + (pair.bytesReceived || 0),
+                });
+            }
+        } catch (e) {
+            out.push('getStats failed: ' + e);
+        }
+        return out;
     }
 
     _clearTurnEndTimers() {
