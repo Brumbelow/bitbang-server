@@ -55,6 +55,7 @@ var stampInputs = []string{
 	"xhr-shim.js",
 	// Temporary: leaves with config.html when the config page becomes a plugin.
 	"config.html",
+	"console.html",
 }
 
 // buildStamp hashes the on-disk bytes of every stamp input, with their
@@ -104,7 +105,8 @@ var allowedBitbangAssets = map[string]bool{
 	"xhr-shim.js":  true,
 	"favicon.ico":  true, // handler internally maps this to favicon.png
 	// Temporary: goes away when a plugin serves its own assets.
-	"config.html": true, // the device-settings meta-page shell
+	"config.html":  true, // the device-settings meta-page shell
+	"console.html": true, // the device-console meta-page shell
 }
 
 // Static returns an http.Handler that serves the signaling server's static

@@ -21,6 +21,7 @@ func stampDir(t *testing.T) string {
 		"ws-shim.js":     "// ws shim\n",
 		"xhr-shim.js":    "// xhr shim\n",
 		"config.html":    "<html><!-- settings --></html>",
+		"console.html":   "<html><!-- console --></html>",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -162,9 +163,12 @@ func TestMetaPageShellIsServed(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("config.html content type = %q, want text/html", ct)
 	}
+	if w := serveAsset(t, dir, "/__bitbang__/console.html"); w.Code != http.StatusOK {
+		t.Fatalf("console.html: got %d, want 200", w.Code)
+	}
 	// Not in the whitelist: a name the SW would reject too, but the server
 	// should not be the thing that lets it through.
-	if w := serveAsset(t, dir, "/__bitbang__/console.html"); w.Code != http.StatusNotFound {
-		t.Errorf("console.html: got %d, want 404 until it is whitelisted", w.Code)
+	if w := serveAsset(t, dir, "/__bitbang__/nope.html"); w.Code != http.StatusNotFound {
+		t.Errorf("nope.html: got %d, want 404", w.Code)
 	}
 }

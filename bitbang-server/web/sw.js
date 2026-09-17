@@ -806,9 +806,9 @@ self.addEventListener('fetch', (event) => {
         // no knowledge of sessions, prefixes, or that it is a meta-page at
         // all. Serve the same file from the bare origin and its fetches would
         // reach the signaling server instead.
-        const meta = url.pathname.match(/^\/__device__\/[^/]+\/\*([A-Za-z0-9_-]+)$/);
+        const meta = url.pathname.match(/^\/__device__\/([^/]+)\/\*([A-Za-z0-9_-]+)$/);
         if (meta) {
-            event.respondWith(serveMetaPage(meta[1]));
+            event.respondWith(serveMetaPage(meta[2], meta[1]));
             return;
         }
 
@@ -853,7 +853,7 @@ async function serveBareMetaPage(event, url) {
     if (!sid || !sessions.has(sid)) {
         return proxyAbsolutePath(event, url);
     }
-    return serveMetaPage(name);
+    return serveMetaPage(name, sid);
 }
 
 // isLikelyAppPopup: does this URL look like a popup from a proxied app
@@ -1014,9 +1014,9 @@ async function redirectViaActiveSession(event, url) {
 //
 // Temporary: the mechanism stays, but 'config' is hardcoded here only until
 // plugins can register a meta-page, at which point this set is built from them.
-const META_PAGES = new Set(['config']);
+const META_PAGES = new Set(['config', 'console']);
 
-async function serveMetaPage(name) {
+async function serveMetaPage(name, sessionId) {
     if (!META_PAGES.has(name)) {
         // Name what does exist. This is the error someone meets first --
         // guessing a name that sounds plausible is exactly how you find out
@@ -1037,7 +1037,24 @@ async function serveMetaPage(name) {
             headers: { 'Content-Type': 'text/plain; charset=utf-8' },
         });
     }
-    return new Response(r.body, {
+    // ws-shim, because a service worker cannot see a WebSocket handshake at
+    // all -- the shim replaces window.WebSocket with a postMessage bridge to
+    // bootstrap, and without it a meta-page opening /__bitbang/<type> would
+    // dial bitba.ng itself and reach nothing.
+    //
+    // fetch() needs no shim: that does reach this handler, and the session is
+    // resolved from the client URL. Which is why the settings page worked
+    // before this existed and the console could not have.
+    //
+    // Only the two globals ws-shim reads, and no cookie replay: a meta-page is
+    // ours and has no app cookies to mirror, so the jar stays out of it.
+    const preamble = '<!DOCTYPE html>'
+        + `<script>window.__bbSessionId=${jsonForScript(sessionId || '')};`
+        + `window.__bbJarKey=null;window.__bbDebug=false;</script>`
+        + '<script src="/__bitbang__/ws-shim.js"></script>';
+
+    const body = preamble + await r.text();
+    return new Response(body, {
         status: 200,
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
     });
