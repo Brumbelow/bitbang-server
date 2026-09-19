@@ -22,6 +22,7 @@ func stampDir(t *testing.T) string {
 		"xhr-shim.js":    "// xhr shim\n",
 		"config.html":    "<html><!-- settings --></html>",
 		"console.html":   "<html><!-- console --></html>",
+		"ota.html":       "<html><!-- firmware --></html>",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
