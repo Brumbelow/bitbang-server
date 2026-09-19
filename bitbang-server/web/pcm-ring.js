@@ -33,9 +33,27 @@ class PcmRing extends AudioWorkletProcessor {
         this.pos = 0;           // read position within the ring, fractional
         this.level = 0;         // samples held
 
-        /* Where the ring should sit. Enough to cover one frame plus the
-           jitter of its arrival; below this the first late frame is a gap. */
-        this.target = o.targetSamples || 1920;   // 120 ms at 16 kHz
+        /* Where the ring should sit: enough to cover how late a frame can
+           actually be.
+         *
+         * Measured against the device over a data channel, with audio the
+         * only stream running: arrivals are p50 61 ms, p95 117, p99 160,
+         * max 351. A frame can therefore be nearly 300 ms later than
+         * nominal, and the buffer has to cover that or fall silent.
+         *
+         * 120 ms underran constantly. 200 ms left two or three underruns a
+         * minute, all of them during the worst arrivals. 300 covers the
+         * observed maximum.
+         *
+         * It is latency, and it is the price of a bursty transport. For
+         * one-way listening 300 ms is imperceptible, and it is cheaper than
+         * dropouts that are not. Two-way audio would have to revisit it,
+         * since there the delay is the product.
+         *
+         * Video streaming at the same time is a different problem and no
+         * target solves it: contention for the SCTP association lock
+         * produced stalls over a second long. See esp32-video-transport.md. */
+        this.target = o.targetSamples || 4800;   // 300 ms at 16 kHz
 
         /* DEVICE_RATE / ctx.sampleRate. 1.0 when the browser honors the
            request, 0.333 at 48 kHz, 0.363 at 44.1 -- one loop either way,
@@ -64,6 +82,21 @@ class PcmRing extends AudioWorkletProcessor {
          * discontinuity now beats staying a second late forever. */
         this.maxLatency = o.maxLatencySamples || this.target * 3;
         this.resyncs = 0;
+
+        /* Smoothing for the level the correction sees. One pole; a quantum
+           is 128 samples, so at 16 kHz 0.002 puts the time constant near 4 s.
+         *
+         * A second was not enough. Real arrivals burst by up to 200 ms, which
+         * passes straight through a one second filter, and the correction
+         * spent its time leaning against jitter with the buffer sitting 60 ms
+         * above target and the output pinned at 0.3%. Drift is a
+         * minutes-long phenomenon and jitter is a sub-second one; four
+         * seconds separates them, where one second sat between them.
+         *
+         * Started at the target so the loop does not spend its first seconds
+         * unwinding a value it was never given. */
+        this.smooth = o.smooth || 0.002;
+        this.avg = this.target;
 
         this.underruns = 0;
         this.overruns = 0;
@@ -131,6 +164,7 @@ class PcmRing extends AudioWorkletProcessor {
                 return true;
             }
             this.priming = false;
+            this.avg = this.level;
         }
 
         /* One extra sample because the interpolation reads the next one. */
@@ -149,12 +183,26 @@ class PcmRing extends AudioWorkletProcessor {
             return true;
         }
 
+        /* Against the smoothed level, not the instantaneous one.
+         *
+         * The raw level sawtooths by a whole frame, because a frame arrives
+         * at once and drains a quantum at a time. Feeding that straight into
+         * the correction made it swing plus and minus 0.125% at the frame
+         * rate -- twenty five times the 0.005% it exists to produce, and a
+         * playback rate modulated at 16 Hz rather than held steady. The loop
+         * was tracking the teeth instead of the trend.
+         *
+         * A second of smoothing is far longer than the sawtooth and far
+         * shorter than any drift worth correcting, so the two separate
+         * cleanly. */
+        this.avg += (this.level - this.avg) * this.smooth;
+
         /* Proportional, and saturating well before it is audible. Which
            makes it useless for large excursions -- at 0.5% it sheds 80
            samples a second -- and that is fine, because those are handled by
            maxLatency rather than here. This only has to cancel drift, which
            is parts per million. */
-        const err = (this.level - this.target) / this.target;
+        const err = (this.avg - this.target) / this.target;
         let c = err * this.maxCorrection;
         if (c > this.maxCorrection) c = this.maxCorrection;
         else if (c < -this.maxCorrection) c = -this.maxCorrection;
@@ -192,6 +240,7 @@ class PcmRing extends AudioWorkletProcessor {
         this.sinceReport = 0;
         this.port.postMessage({
             level: this.level,
+            avg: this.avg,
             target: this.target,
             correction: this.correction,
             underruns: this.underruns,

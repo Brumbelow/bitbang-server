@@ -103,8 +103,10 @@
   <tr><td class="k">context rate</td><td class="v" id="ctxrate">-</td></tr>
 </table>
 <canvas id="plot" width="880" height="120"></canvas>
-<div class="note">buffer level against its target. Flat is the answer; a
-  steady slope means the correction is not holding.</div>
+<div class="note">Band is the raw level, which sawtooths by one frame
+  because a frame arrives at once and drains gradually -- that is healthy and
+  says nothing. The line through it is the trend, and the line is what should
+  be flat. A steady slope means the correction is not holding.</div>
 
 <script>
 const DEVICE_RATE = 16000;
@@ -136,7 +138,7 @@ function encodeUlaw(x) {
 /* -- the renderer ------------------------------------------------------ */
 
 let ctx = null, node = null, frames = 0;
-const history = [];
+const history = [], raw = [];
 
 async function start() {
     /* Ask for the device's rate. A browser that honors it makes the
@@ -152,7 +154,7 @@ async function start() {
         processorOptions: {
             step,
             capacity: Math.ceil(ctx.sampleRate * 2),
-            targetSamples: Math.ceil(ctx.sampleRate * 0.12),
+            targetSamples: Math.ceil(ctx.sampleRate * 0.3),
         },
     });
     node.connect(ctx.destination);
@@ -178,26 +180,49 @@ function show(s, step) {
     $('resync').className = 'v' + (s.resyncs ? ' warn' : ' ok');
     $('frames').textContent = frames;
 
-    history.push(s.level / s.target);
+    /* The raw level sawtooths by one whole frame, because a frame arrives at
+       once and drains 128 samples at a time. At 60 ms frames against a 120 ms
+       target that is a 48% swing -- it fills the plot, looks alarming, and
+       says nothing. The trend under it is the drift, so the trend is what is
+       drawn: the mean over the last second or so.
+
+       Both are kept. The band shows the sawtooth's extent, the line shows
+       where it sits, and it is the line that should be flat. */
+    raw.push(s.level / s.target);
+    if (raw.length > 16) raw.shift();
+    let lo = Infinity, hi = -Infinity, sum = 0;
+    for (const v of raw) { if (v < lo) lo = v; if (v > hi) hi = v; sum += v; }
+
+    history.push({ mean: sum / raw.length, lo, hi });
     if (history.length > 880) history.shift();
     plot(history);
 }
 
 function plot(h) {
     const c = $('plot'), g = c.getContext('2d');
+    const y = v => {
+        let p = c.height / 2 - (v - 1) * (c.height / 2);
+        return p < 1 ? 1 : (p > c.height - 1 ? c.height - 1 : p);
+    };
     g.clearRect(0, 0, c.width, c.height);
+
+    /* The sawtooth, as a band rather than a line. */
+    g.fillStyle = '#3b82f629';
+    g.beginPath();
+    for (let i = 0; i < h.length; i++) g.lineTo(i, y(h[i].hi));
+    for (let i = h.length - 1; i >= 0; i--) g.lineTo(i, y(h[i].lo));
+    g.closePath();
+    g.fill();
     /* The target line. Everything is drawn relative to it, so the shape is
        readable whatever the absolute buffer size is. */
     g.strokeStyle = '#8884';
     g.beginPath(); g.moveTo(0, c.height / 2); g.lineTo(c.width, c.height / 2); g.stroke();
+    /* And the trend through it. This is the line that answers the drift
+       question: flat means the correction is holding. */
     g.strokeStyle = '#3b82f6';
     g.beginPath();
     for (let i = 0; i < h.length; i++) {
-        /* Centre is target, top is 2x, bottom is empty. Clamped, because an
-           excursion that leaves the canvas is the one worth seeing. */
-        let y = c.height / 2 - (h[i] - 1) * (c.height / 2);
-        if (y < 1) y = 1; else if (y > c.height - 1) y = c.height - 1;
-        if (i === 0) g.moveTo(i, y); else g.lineTo(i, y);
+        if (i === 0) g.moveTo(i, y(h[i].mean)); else g.lineTo(i, y(h[i].mean));
     }
     g.stroke();
 }
@@ -205,18 +230,51 @@ function plot(h) {
 /* -- the generator ----------------------------------------------------- */
 
 function runGenerator() {
-    let phase = 0, sweep = 200, carry = 0, seq = 0;
+    let phase = 0, sweep = 200, seq = 0;
+    let t0 = performance.now(), produced = 0, rateWas = null;
+    const frameSamples = () => Math.round(parseFloat($('rate').value) * FRAME_MS / 1000);
 
+    /* Reused, not reallocated per frame.
+     *
+     * A fresh Uint8Array and Float32Array seventeen times a second is a
+     * steady trickle of small garbage, and a collection every several
+     * seconds delays the generator enough to move the buffer -- which the
+     * correction then leans against. The harness would be manufacturing the
+     * disturbance it is supposed to be measuring. postMessage clones rather
+     * than transfers, so the buffer is ours again as soon as it returns. */
+    let bytes = null, pcm = null;
+
+    /* Paced by the clock, not by the timer.
+     *
+     * setInterval does not fire every 60 ms. It jitters by milliseconds and
+     * coalesces under load, so trusting it to mean 60 ms of audio puts the
+     * generator's rate off by a percent or more -- against the 50 ppm, or
+     * 0.005%, this harness exists to measure. The first version did exactly
+     * that and produced a sawtooth: the buffer ran away on the timer's error
+     * and was reset by a prime or a resync, over and over.
+     *
+     * So the timer only asks how much audio *should* exist by now. Whatever
+     * it has not produced yet, it produces. Jitter then shows up as jitter in
+     * frame arrival, which is realistic, rather than as an error in the rate,
+     * which is not. */
     setInterval(() => {
         const rate = parseFloat($('rate').value);
-        /* Fractional samples carry between frames, so a rate of 16000.8
-           really is 16000.8 over time rather than 16000 with a rounding
-           error that happens to look like drift. */
-        const exact = rate * (FRAME_MS / 1000) + carry;
-        const count = Math.floor(exact);
-        carry = exact - count;
+        if (rate !== rateWas) {          /* a new rate restarts the accounting */
+            rateWas = rate;
+            t0 = performance.now();
+            produced = 0;
+        }
 
-        const bytes = new Uint8Array(count);
+        const due = Math.floor((performance.now() - t0) / 1000 * rate) - produced;
+        const per = frameSamples();
+        if (due < per) return;           /* not a whole frame's worth yet */
+        const count = per;
+        produced += count;
+
+        if (bytes === null || bytes.length !== count) {
+            bytes = new Uint8Array(count);
+            pcm = new Float32Array(count);
+        }
         const kind = $('signal').value;
         for (let i = 0; i < count; i++) {
             let x;
@@ -239,17 +297,21 @@ function runGenerator() {
         const drop = parseInt($('drop').value, 10);
         if (drop > 0 && seq % drop === 0) return;   /* a frame that never arrives */
         deliver(bytes);
-    }, FRAME_MS);
+        /* Well under a frame, so the clock rather than the timer decides when
+           a frame is due. */
+    }, 10);
 }
 
 let stalled = false, held = [];
 
-function deliver(bytes) {
-    if (stalled) { held.push(bytes); return; }
+function deliver(b) {
+    /* The stall path has to keep its own copy, since the shared buffer is
+       overwritten on the next tick. Only that path allocates, and only while
+       a stall is being simulated. */
+    if (stalled) { held.push(b.slice()); return; }
     frames++;
-    const pcm = new Float32Array(bytes.length);
-    for (let i = 0; i < bytes.length; i++) pcm[i] = ULAW[bytes[i]];
-    node.port.postMessage(pcm);
+    for (let i = 0; i < b.length; i++) pcm[i] = ULAW[b[i]];
+    node.port.postMessage(pcm.length === b.length ? pcm : pcm.subarray(0, b.length));
 }
 
 $('stall').onclick = () => {
