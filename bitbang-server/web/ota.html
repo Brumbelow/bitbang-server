@@ -140,7 +140,15 @@ let status = null;
 
 async function loadStatus() {
     const r = await fetch(SRC, { cache: 'no-store' });
-    if (!r.ok) throw new Error(`device answered ${r.status}`);
+    if (!r.ok) {
+        /* An HTTP status, however unwelcome, means the device answered. That
+           is a different thing from not reaching it at all, and after an
+           update the difference is the whole diagnosis: a 404 here says the
+           image that just booted has no update endpoint. */
+        const e = new Error(`device answered ${r.status}`);
+        e.status = r.status;
+        throw e;
+    }
     status = await r.json();
 
     const when = [status.date, status.time].filter(Boolean).join(' ');
@@ -365,21 +373,49 @@ async function waitForReturn() {
     $('incoming').innerHTML = '';
     $('bar').classList.add('hide');
 
+    /* Reaching the device at all means it registered: every request travels
+       through signaling. So a reply still saying pending-verify is not an
+       image waiting to be accepted, it is an image that does not accept
+       itself. One reading could be the instant between registering and
+       marking; two in a row cannot. */
+    let stillOnProbation = 0;
+
     while (performance.now() < deadline) {
         await new Promise(r => setTimeout(r, 3000));
         try {
             await loadStatus();
-        } catch (_) {
+        } catch (e) {
+            if (e.status) {
+                /* It booted and it is reachable, so the update "worked" -- but
+                   this image cannot receive the next one. Say what to do while
+                   it is still worth doing: an image that has not accepted
+                   itself is one power cycle away from being undone, and an
+                   image that has is a trip with a USB cable. */
+                say(`The device is back, but this image has no update endpoint `
+                  + `(${e.status}). If it has not accepted itself, power cycling `
+                  + `now puts the previous image back. If it has, the next `
+                  + `update has to go over USB.`, 'err');
+                return;
+            }
             const secs = Math.round((performance.now() - started) / 1000);
             say(`Waiting for the device to come back (${secs}s)...`);
             continue;
         }
 
         if (status.state === 'pending-verify') {
+            if (++stillOnProbation < 2) {
+                say(`Running ${esc(status.version || '')} from ${esc(status.running)}, `
+                  + 'waiting for it to accept itself.', 'warn');
+                continue;
+            }
             say(`Running ${esc(status.version || '')} from ${esc(status.running)}, `
-              + 'on probation until it registers.', 'warn');
-            continue;
+              + 'but it has not accepted itself. It is reachable, so it has '
+              + 'already registered and is not going to: the bootloader will '
+              + 'put the previous image back at the next reset.', 'err');
+            $('drop').classList.remove('hide');
+            return;
         }
+        stillOnProbation = 0;
 
         if (status.state === 'valid') {
             if (before && status.running === before.running
@@ -414,5 +450,18 @@ drop.ondrop = e => {
     if (e.dataTransfer.files[0]) choose(e.dataTransfer.files[0]);
 };
 
-loadStatus().catch(e => say('Could not reach the device: ' + e.message, 'err'));
+loadStatus().catch(e => {
+    if (e.status === 404) {
+        /* Reached it, and it has no /__bitbang/ota. Firmware too old for
+           updates over BitBang rather than anything wrong here. */
+        $('update-head').classList.add('hide');
+        $('drop').classList.add('hide');
+        say('This device is running firmware without an update endpoint, so it '
+          + 'cannot be updated from here. It needs one flash over USB with a '
+          + 'build that has one.', 'err');
+        return;
+    }
+    say(e.status ? `The device answered ${e.status}.`
+                 : 'Could not reach the device: ' + e.message, 'err');
+});
 </script>
