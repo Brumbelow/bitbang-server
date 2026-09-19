@@ -346,3 +346,50 @@ func TestMain(m *testing.M) {
 	})
 	m.Run()
 }
+
+// A device must be able to refuse a connection and have the reason reach the
+// browser.
+//
+// The failure this guards: device_ws forwards on an explicit allowlist of
+// message types and warns on anything else. A device that says no into a type
+// the server drops is indistinguishable from a device that says nothing --
+// the connector waits out its offer timeout and reports the device as not
+// responding, which is both wrong and unactionable when the device answered
+// at once and is simply full.
+func TestDeviceError_ReachesTheClient(t *testing.T) {
+	srv, _, td := testServer(t)
+	defer td()
+
+	uid, pubB64 := newTestIdentity(t)
+
+	device := dialWS(t, srv, "/ws/device/"+uid)
+	defer device.Close()
+	writeJSON(t, device, wire.Register{
+		Type:      "register",
+		Protocol:  wire.ProtocolVersion,
+		PublicKey: pubB64,
+	})
+	readMsg(t, device, "registered")
+
+	client := dialWS(t, srv, "/ws/client/"+uid)
+	defer client.Close()
+	writeJSON(t, client, map[string]any{"type": "request"})
+
+	// The device learns which client asked, then refuses it.
+	req := readMsg(t, device, "request")
+	clientID, _ := req["client_id"].(string)
+	if clientID == "" {
+		t.Fatal("device saw a request with no client_id")
+	}
+
+	writeJSON(t, device, map[string]any{
+		"type":      "error",
+		"client_id": clientID,
+		"message":   "device_busy",
+	})
+
+	got := readMsg(t, client, "error")
+	if got["message"] != "device_busy" {
+		t.Errorf("client got message %q, want device_busy", got["message"])
+	}
+}

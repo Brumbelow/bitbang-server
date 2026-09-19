@@ -294,6 +294,19 @@ func (d *Deps) deviceRelay(conn *registry.DeviceConn) {
 			_ = client.SendJSON(json.RawMessage(data))
 			d.Log.Debug("forwarded candidate", "from", conn.UID, "to", env.ClientID)
 
+		case "error":
+			// A device refusing a connection, forwarded verbatim to the
+			// browser that asked for one. Without this a device has no way to
+			// say no: it goes silent, the connector waits out its offer
+			// timeout and reports the device as not responding -- which is
+			// wrong when the device answered at once and is simply full.
+			//
+			// The payload is a short code the connector maps to wording it
+			// owns. An unrecognised one falls through to its generic failure,
+			// so a device cannot put arbitrary text on somebody's screen.
+			_ = client.SendJSON(json.RawMessage(data))
+			d.Log.Info("forwarded device error", "from", conn.UID, "to", env.ClientID)
+
 		case "pair_approved", "pair_rejected":
 			// Pairing outcomes: forward verbatim to the originating
 			// connector. The device validated the SAS out-of-band and

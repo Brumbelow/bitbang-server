@@ -857,6 +857,11 @@ class BitBangConnection {
         if (msg === 'WebSocket connection failed') return 'Could not reach server';
         if (msg === 'Service Worker not supported') return 'This browser is not supported';
         if (msg === 'offer_timeout') return 'Device not responding';
+        // The device answered and refused: every session slot is taken. Worth
+        // its own wording because it is the one failure here the person can
+        // actually do something about, and because it used to arrive as
+        // "Device not responding" after a 30 second wait.
+        if (msg === 'device_busy') return 'Device is busy: too many viewers connected';
         return 'Connection failed';
     }
 
