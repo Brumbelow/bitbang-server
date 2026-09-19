@@ -358,9 +358,13 @@ class BitBangConnection {
         this.candidateQueue = new CandidateQueue();
         this.remoteDescriptionSet = false;
         this.progressChannel = new BroadcastChannel('bitbang-progress');
-        // Frames arriving on a video channel, forwarded to whatever page the
+        // Frames arriving on a stream channel, forwarded to whatever page the
         // device served. The page owns the canvas; this only carries bytes.
         this.videoFrameChannel = new BroadcastChannel('bitbang-video');
+        // Stream channels by "presentation/component": cam/video, cam/audio.
+        // One entry per component, each with its own reassembly state, because
+        // each numbers its frames independently. See attachStreamChannel.
+        this.streams = new Map();
 
         this.statusEl = document.getElementById('status');
         this.connectionUI = document.getElementById('connection-ui');
@@ -421,35 +425,57 @@ class BitBangConnection {
 
     // A channel carrying frames rather than SWSP. Each message is one chunk of
     // one frame; see VIDEO_CHUNK_HEADER on the device for why frames are split.
-    attachVideoChannel(ch) {
-        // cam/video -> presentation "cam", component "video". A bare label from
-        // older firmware is treated as its own presentation, which is what it
-        // effectively was when there could only be one.
+    //
+    // One of these per component, and the reassembly state belongs to the
+    // component rather than to the connection: a presentation is cam/video plus
+    // cam/audio, each numbering its own frames from zero. Held in one set of
+    // fields, the second channel to open would reset the first one's frame map
+    // and newest id, and the two streams' frame ids would collide in it --
+    // video would break the moment a device declared audio, before a sample was
+    // sent. See av-streaming-api.md.
+    attachStreamChannel(ch) {
+        // cam/video -> presentation "cam", component "video".
         const slash = ch.label.indexOf('/');
         const presentation = slash > 0 ? ch.label.slice(0, slash) : ch.label;
         const component = slash > 0 ? ch.label.slice(slash + 1) : 'video';
         const codec = ch.protocol && ch.protocol.startsWith(STREAM_PROTOCOL_PREFIX)
             ? ch.protocol.slice(STREAM_PROTOCOL_PREFIX.length)
             : 'mjpeg';
-        console.log(`[Bootstrap] stream channel open: ${presentation}/${component}, codec ${codec}`);
-        this.videoStream = { presentation, component, codec };
+        const key = `${presentation}/${component}`;
+        console.log(`[Bootstrap] stream channel open: ${key}, codec ${codec}`);
+
         ch.binaryType = 'arraybuffer';
-        this.videoChannel = ch;
-        this.videoFrames = new Map();   // frame id -> partial frame
-        this.videoNewest = -1;          // newest frame id already drawn
-        this.videoStats = { drawn: 0, dropped: 0, since: performance.now() };
+        const s = {
+            presentation, component, codec, ch,
+            frames: new Map(),   // frame id -> partial frame
+            newest: -1,          // newest frame id already forwarded
+            stats: { drawn: 0, dropped: 0, since: performance.now() },
+        };
+        this.streams.set(key, s);
+
         ch.onmessage = (e) => {
             if (this.benchVideo) {
                 this.countBenchMessage(e.data);
                 return;
             }
-            this.handleVideoChunk(e.data);
+            this.handleStreamChunk(s, e.data);
         };
         ch.onclose = () => {
-            console.log('[Bootstrap] video channel closed');
-            this.videoChannel = null;
-            this.videoFrames = null;
+            console.log(`[Bootstrap] stream channel closed: ${key}`);
+            // Only if this is still the channel under that key. A reconnect can
+            // attach a new one before the old one's close fires, and deleting
+            // unconditionally would drop the live stream.
+            if (this.streams.get(key) === s) this.streams.delete(key);
         };
+    }
+
+    // The stream a caller means when it does not say. Bench and teardown want
+    // "the video channel" from when there could only be one.
+    firstStream() {
+        for (const s of this.streams.values()) {
+            if (s.component === 'video') return s;
+        }
+        return this.streams.values().next().value;
     }
 
     // Reassemble one frame from its chunks.
@@ -460,7 +486,7 @@ class BitBangConnection {
     // short when newer frames are completing is missing a chunk that is not
     // coming, and waiting for it would only add latency to everything behind
     // it.
-    handleVideoChunk(buf) {
+    handleStreamChunk(s, buf) {
         if (buf.byteLength < VIDEO_CHUNK_HEADER) return;
         const dv = new DataView(buf);
         const frameId = dv.getUint32(0, true);
@@ -471,25 +497,25 @@ class BitBangConnection {
         if (count === 0 || index >= count) return;
 
         // A device that restarts begins numbering at zero again.
-        if (frameId + 1000 < this.videoNewest) {
-            this.videoFrames.clear();
-            this.videoNewest = -1;
+        if (frameId + 1000 < s.newest) {
+            s.frames.clear();
+            s.newest = -1;
         }
         // Already drawn, or older than what has been drawn.
-        if (frameId <= this.videoNewest) return;
+        if (frameId <= s.newest) return;
 
-        let f = this.videoFrames.get(frameId);
+        let f = s.frames.get(frameId);
         if (f === undefined) {
             f = { count, got: 0, bytes: 0, parts: new Array(count),
                   ptsMs, keyframe: (flags & VIDEO_FLAG_KEYFRAME) !== 0 };
-            this.videoFrames.set(frameId, f);
-            if (this.videoFrames.size > VIDEO_FRAME_SLOTS) {
+            s.frames.set(frameId, f);
+            if (s.frames.size > VIDEO_FRAME_SLOTS) {
                 let oldest = Infinity;
-                for (const id of this.videoFrames.keys()) {
+                for (const id of s.frames.keys()) {
                     if (id < oldest) oldest = id;
                 }
-                this.videoFrames.delete(oldest);
-                this.videoStats.dropped++;
+                s.frames.delete(oldest);
+                s.stats.dropped++;
                 // The chunk that just arrived belongs to the frame that was
                 // evicted: it is behind everything else in flight.
                 if (oldest === frameId) return;
@@ -508,27 +534,28 @@ class BitBangConnection {
             frame.set(p, off);
             off += p.byteLength;
         }
-        this.videoFrames.delete(frameId);
-        this.videoNewest = frameId;
+        s.frames.delete(frameId);
+        s.newest = frameId;
         // Anything still pending is older than what is about to be drawn.
-        for (const id of [...this.videoFrames.keys()]) {
+        for (const id of [...s.frames.keys()]) {
             if (id < frameId) {
-                this.videoFrames.delete(id);
-                this.videoStats.dropped++;
+                s.frames.delete(id);
+                s.stats.dropped++;
             }
         }
 
         if (f.bytes === 0) return;   // nothing to draw
 
-        this.videoStats.drawn++;
-        const secs = (performance.now() - this.videoStats.since) / 1000;
+        s.stats.drawn++;
+        const secs = (performance.now() - s.stats.since) / 1000;
         if (secs >= 5) {
-            const st = this.videoStats;
+            const st = s.stats;
             // Debug only: this is the counter that says whether reassembly is
             // keeping up, which matters while something is wrong and is noise
             // the rest of the time.
             if (this.debug) {
-                console.log(`[video] ${(st.drawn / secs).toFixed(1)} fps, ` +
+                console.log(`[${s.presentation}/${s.component}] ` +
+                            `${(st.drawn / secs).toFixed(1)} fps, ` +
                             `${st.drawn} drawn, ${st.dropped} incomplete`);
             }
             st.drawn = 0; st.dropped = 0; st.since = performance.now();
@@ -542,11 +569,17 @@ class BitBangConnection {
         // first one it sees as the origin -- which also means a device restart
         // is just a new origin rather than a discontinuity to handle.
         // The stream name and codec ride along so a page can bind an element to
-        // a presentation and pick a decoder without asking anything else.
+        // a presentation and pick a decoder without asking anything else, and
+        // the component so it can tell two streams of one presentation apart.
+        //
+        // No transfer list: BroadcastChannel.postMessage does not take one, so
+        // every frame is structured-cloned on its way out. One of the reasons
+        // this should become a MessagePort, which does -- see
+        // av-streaming-api.md. It used to pass one here, which read as if the
+        // buffer moved when it never did.
         this.videoFrameChannel.postMessage(
             { type: 'frame', data: frame.buffer, ptsMs: f.ptsMs, keyframe: f.keyframe,
-              stream: this.videoStream?.presentation, codec: this.videoStream?.codec },
-            [frame.buffer]);
+              stream: s.presentation, component: s.component, codec: s.codec });
     }
 
     // Benchmark accounting for messages arriving on the video channel. The
@@ -588,7 +621,7 @@ class BitBangConnection {
             console.error('[bench] data channel is not open');
             return;
         }
-        if (!this.videoChannel) {
+        if (!this.firstStream()) {
             console.error('[bench] the video channel is not open');
             return;
         }
@@ -847,7 +880,9 @@ class BitBangConnection {
             // is usually not eligible anyway, so this is close to always taken.
             if (event.persisted) return;
             try { if (this.dataChannel) this.dataChannel.close(); } catch (e) { /* already gone */ }
-            try { if (this.videoChannel) this.videoChannel.close(); } catch (e) { /* already gone */ }
+            for (const s of this.streams.values()) {
+                try { s.ch.close(); } catch (e) { /* already gone */ }
+            }
             try { if (this.pc) this.pc.close(); } catch (e) { /* already gone */ }
         });
 
@@ -1289,13 +1324,12 @@ class BitBangConnection {
             // attaching the SWSP parser to a channel carrying anything else
             // reads its payload as frame headers -- and reassigning
             // this.dataChannel would send SWSP out on the wrong one.
-            // Dispatch on the protocol, falling back to the bare "video" label
-            // so a device on firmware that predates the protocol field still
-            // works. The label alone cannot classify a channel -- "cam/video"
-            // names one stream among possibly several.
+            // Dispatch on the protocol. The label alone cannot classify a
+            // channel -- "cam/video" names one stream among possibly several,
+            // and says nothing about how to decode it.
             const proto = event.channel.protocol || '';
-            if (proto.startsWith(STREAM_PROTOCOL_PREFIX) || event.channel.label === 'video') {
-                this.attachVideoChannel(event.channel);
+            if (proto.startsWith(STREAM_PROTOCOL_PREFIX)) {
+                this.attachStreamChannel(event.channel);
                 return;
             }
 
