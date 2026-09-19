@@ -56,6 +56,7 @@ var stampInputs = []string{
 	// Temporary: leaves with config.html when the config page becomes a plugin.
 	"config.html",
 	"console.html",
+	"ota.html",
 }
 
 // buildStamp hashes the on-disk bytes of every stamp input, with their
@@ -107,6 +108,7 @@ var allowedBitbangAssets = map[string]bool{
 	// Temporary: goes away when a plugin serves its own assets.
 	"config.html":  true, // the device-settings meta-page shell
 	"console.html": true, // the device-console meta-page shell
+	"ota.html":     true, // the device-firmware meta-page shell
 }
 
 // Static returns an http.Handler that serves the signaling server's static

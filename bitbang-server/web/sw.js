@@ -1014,7 +1014,7 @@ async function redirectViaActiveSession(event, url) {
 //
 // Temporary: the mechanism stays, but 'config' is hardcoded here only until
 // plugins can register a meta-page, at which point this set is built from them.
-const META_PAGES = new Set(['config', 'console']);
+const META_PAGES = new Set(['config', 'console', 'ota']);
 
 async function serveMetaPage(name, sessionId) {
     if (!META_PAGES.has(name)) {
