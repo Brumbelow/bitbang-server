@@ -57,6 +57,7 @@ var stampInputs = []string{
 	"config.html",
 	"console.html",
 	"ota.html",
+	"pcm-ring.js",
 }
 
 // buildStamp hashes the on-disk bytes of every stamp input, with their
@@ -109,6 +110,10 @@ var allowedBitbangAssets = map[string]bool{
 	"config.html":  true, // the device-settings meta-page shell
 	"console.html": true, // the device-console meta-page shell
 	"ota.html":     true, // the device-firmware meta-page shell
+	// An AudioWorklet module, so it needs a URL: addModule cannot take a
+	// string. Served here rather than embedded in a device page, because a
+	// renderer is a property of the codec and not of any one device.
+	"pcm-ring.js": true,
 }
 
 // Static returns an http.Handler that serves the signaling server's static

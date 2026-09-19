@@ -113,14 +113,42 @@ class PcmRing extends AudioWorkletProcessor {
          * stream. Starting quiet costs one buffer of latency, once. */
         this.priming = true;
 
+        /* The device time of the sample currently being played.
+         *
+         * Audio plays continuously, so its playback position is a clock, and
+         * that is what video frames get selected against: draw the frame
+         * whose pts is nearest this, drop the ones that miss. Every media
+         * player is built this way round, because a dropped video frame at
+         * 15-20 fps is close to invisible and 20 ms of missing audio is an
+         * audible click. See av-streaming-api.md.
+         *
+         * Maintained by advancing it as samples are consumed and reanchoring
+         * whenever the read position moves for any other reason -- a resync,
+         * a re-prime -- because those are exactly the moments when counting
+         * samples stops being the same thing as counting time. NaN until the
+         * first frame arrives, so a consumer can tell "not yet" from zero. */
+        this.playPts = NaN;
+        this.rate = o.deviceRate || 16000;
+
         this.port.onmessage = (e) => this.onFrame(e.data);
     }
 
     /* Runs on the audio thread but outside process(), so a copy here is
        acceptable where an allocation inside process() would not be. */
-    onFrame(samples) {
+    onFrame(msg) {
+        /* Either a bare Float32Array or { pcm, ptsMs }. The timestamp is what
+           makes this a clock rather than a buffer; without it the ring still
+           plays, it just cannot say when. */
+        const samples = (msg instanceof Float32Array) ? msg : (msg && msg.pcm);
+        const ptsMs = (msg && msg.ptsMs !== undefined) ? msg.ptsMs : NaN;
         if (!(samples instanceof Float32Array)) return;
         const n = samples.length;
+
+        /* Anchor on the first frame after silence: nothing is being played,
+           so whatever arrives next is what plays next. */
+        if (this.level === 0 && !Number.isNaN(ptsMs)) {
+            this.playPts = ptsMs;
+        }
 
         /* A ring that is already full means the far side is ahead of us by
            more than the buffer holds -- almost always the aftermath of a
@@ -130,6 +158,7 @@ class PcmRing extends AudioWorkletProcessor {
             const drop = this.level + n - this.cap;
             this.r = (this.r + drop) % this.cap;
             this.level -= drop;
+            this.playPts += drop * 1000 / this.rate;
             this.overruns++;
         }
 
@@ -147,6 +176,7 @@ class PcmRing extends AudioWorkletProcessor {
             const skip = this.level - this.target;
             this.r = (this.r + skip) % this.cap;
             this.level -= skip;
+            this.playPts += skip * 1000 / this.rate;
             this.pos = 0;
             this.resyncs++;
         }
@@ -229,6 +259,9 @@ class PcmRing extends AudioWorkletProcessor {
         this.r = (this.r + used) % this.cap;
         this.level -= used;
         this.pos = pos - used;
+        /* In device time, because the ring holds device samples -- the
+           correction changes how fast we read them, not what they mean. */
+        this.playPts += used * 1000 / this.rate;
 
         this.report(n);
         return true;
@@ -241,6 +274,7 @@ class PcmRing extends AudioWorkletProcessor {
         this.port.postMessage({
             level: this.level,
             avg: this.avg,
+            playPts: this.playPts,
             target: this.target,
             correction: this.correction,
             underruns: this.underruns,
