@@ -63,8 +63,33 @@ class PcmRing extends AudioWorkletProcessor {
 
         /* The correction is proportional and capped. Capped because the cap
            is what keeps it inaudible; proportional because drift is a rate
-           and wants a rate correction, not a splice. */
+           and wants a rate correction, not a splice.
+
+           Asymmetric, because the two directions do not cost the same thing.
+
+           Running *below* target risks an underrun, which is a click, and
+           slowing down barely helps anyway -- what refills a ring is the far
+           side sending, not this side reading gently. So that direction stays
+           at 0.5%, where it is inaudible.
+
+           Running *above* target costs only latency, and there is no reason
+           to be gentle about giving that back. Measured against the device:
+           after two underruns the ring refilled to 480 ms against a 300 ms
+           target and stayed there, because at 60% over target the
+           proportional term still only computed 0.3% -- 48 samples a second,
+           a full minute to drain 180 ms. The buffer was far more willing to
+           take latency than to return it, and the excess is what you hear.
+
+           1.5% is about 26 cents of pitch. On speech, sustained, that is not
+           something anyone picks up without a reference to compare against,
+           and it only runs while there is an overshoot to remove. It drains
+           240 samples a second: the same 180 ms comes back in 12 s. */
         this.maxCorrection = o.maxCorrection || 0.005;
+        this.maxDrain = o.maxDrain || 0.015;
+
+        /* How hard the loop pulls per unit of relative error, which used to
+           be maxCorrection itself. See the correction in process(). */
+        this.gain = o.gain || 0.03;
 
         /* How far behind live the stream may fall before samples are thrown
            away rather than played out.
@@ -102,6 +127,19 @@ class PcmRing extends AudioWorkletProcessor {
         this.overruns = 0;
         this.correction = 0;
         this.sinceReport = 0;
+
+        /* The low-water mark since the last report, which is the only number
+           that says whether the target is the right size.
+         *
+         * `level` sawtooths by a whole frame and `avg` deliberately smooths
+         * that away, so neither answers "how close did we come to running
+         * out". This does: the headroom between it and zero is target that
+         * could be given back as latency, and the headroom being consistently
+         * large is the evidence for lowering the target rather than a guess
+         * that it is safe to. Reset per window, so a single bad moment shows
+         * in the window it happened in rather than pinning the figure for the
+         * rest of the session. */
+        this.minLevel = Infinity;
 
         /* Silent until the ring first reaches its target.
          *
@@ -227,14 +265,24 @@ class PcmRing extends AudioWorkletProcessor {
          * cleanly. */
         this.avg += (this.level - this.avg) * this.smooth;
 
-        /* Proportional, and saturating well before it is audible. Which
-           makes it useless for large excursions -- at 0.5% it sheds 80
-           samples a second -- and that is fine, because those are handled by
-           maxLatency rather than here. This only has to cancel drift, which
-           is parts per million. */
+        /* Proportional, with the gain separate from the caps.
+         *
+         * These were the same number, and that was the defect: with the gain
+         * equal to the cap, the correction could only reach the cap at 100%
+         * error. A ring sitting 60% over target -- 480 ms against 300, which
+         * is what the device actually produced -- computed 0.3% and took a
+         * minute to drain. The cap it was nominally limited by was never
+         * once reachable, so the limit doing the work was the gain, silently,
+         * and every argument about the cap being inaudible was beside the
+         * point.
+         *
+         * 0.03 saturates the drain at 50% over target, which puts the loop's
+         * time constant near 10 s against the 4 s smoothing above -- fast
+         * enough to matter, slow enough that the two still separate and the
+         * correction does not start chasing jitter again. */
         const err = (this.avg - this.target) / this.target;
-        let c = err * this.maxCorrection;
-        if (c > this.maxCorrection) c = this.maxCorrection;
+        let c = err * this.gain;
+        if (c > this.maxDrain) c = this.maxDrain;
         else if (c < -this.maxCorrection) c = -this.maxCorrection;
         this.correction = c;
 
@@ -268,12 +316,18 @@ class PcmRing extends AudioWorkletProcessor {
     }
 
     report(n) {
+        /* Sampled here rather than at the point of consumption because every
+           path through process() ends in a report -- including the underrun
+           and priming returns, which are exactly the moments worth catching. */
+        if (this.level < this.minLevel) this.minLevel = this.level;
+
         this.sinceReport += n;
         if (this.sinceReport < 2048) return;
         this.sinceReport = 0;
         this.port.postMessage({
             level: this.level,
             avg: this.avg,
+            minLevel: this.minLevel,
             playPts: this.playPts,
             target: this.target,
             correction: this.correction,
@@ -281,6 +335,7 @@ class PcmRing extends AudioWorkletProcessor {
             overruns: this.overruns,
             resyncs: this.resyncs,
         });
+        this.minLevel = Infinity;
     }
 }
 
