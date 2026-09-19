@@ -360,7 +360,17 @@ class BitBangConnection {
         this.progressChannel = new BroadcastChannel('bitbang-progress');
         // Frames arriving on a stream channel, forwarded to whatever page the
         // device served. The page owns the canvas; this only carries bytes.
-        this.videoFrameChannel = new BroadcastChannel('bitbang-video');
+        //
+        // A MessagePort rather than a BroadcastChannel, because postMessage
+        // takes a transfer list and BroadcastChannel does not: a frame is
+        // handed over rather than structured-cloned on its way to the page.
+        // Created in wireStreams, where there is finally a page to hand it to.
+        this.streamPort = null;
+        // The same frames on a BroadcastChannel, for debug sessions only --
+        // it is what audio-harness.html taps to run against a real device.
+        // Opened on first use because debug is not parsed until below, and it
+        // costs a copy of every frame, so it stays shut otherwise.
+        this.videoFrameChannel = null;
         // Stream channels by "presentation/component": cam/video, cam/audio.
         // One entry per component, each with its own reassembly state, because
         // each numbers its frames independently. See attachStreamChannel.
@@ -438,20 +448,33 @@ class BitBangConnection {
         const slash = ch.label.indexOf('/');
         const presentation = slash > 0 ? ch.label.slice(0, slash) : ch.label;
         const component = slash > 0 ? ch.label.slice(slash + 1) : 'video';
-        const codec = ch.protocol && ch.protocol.startsWith(STREAM_PROTOCOL_PREFIX)
+        // bitbang-stream/ulaw, or bitbang-stream/ulaw;rate=8000. The parameter
+        // is optional and nothing sends one yet; a renderer that needs a rate
+        // supplies its own default. Parsed here so declaring one later is a
+        // firmware change rather than a change on both sides.
+        const proto = ch.protocol && ch.protocol.startsWith(STREAM_PROTOCOL_PREFIX)
             ? ch.protocol.slice(STREAM_PROTOCOL_PREFIX.length)
             : 'mjpeg';
+        const semi = proto.indexOf(';');
+        const codec = semi > 0 ? proto.slice(0, semi) : proto;
+        const rateMatch = /;\s*rate=(\d+)/.exec(proto);
+        const rate = rateMatch ? parseInt(rateMatch[1], 10) : undefined;
         const key = `${presentation}/${component}`;
         console.log(`[Bootstrap] stream channel open: ${key}, codec ${codec}`);
 
         ch.binaryType = 'arraybuffer';
         const s = {
-            presentation, component, codec, ch,
+            presentation, component, codec, rate, ch,
             frames: new Map(),   // frame id -> partial frame
             newest: -1,          // newest frame id already forwarded
             stats: { drawn: 0, dropped: 0, since: performance.now() },
         };
         this.streams.set(key, s);
+        // The page cannot bind an element to a component it has not heard of,
+        // and it cannot hear of one any other way: nothing arrives on the
+        // channel until something subscribes, and subscribing is what binding
+        // decides. So the list is pushed, not polled.
+        this.announceStreams();
 
         ch.onmessage = (e) => {
             if (this.benchVideo) {
@@ -466,7 +489,26 @@ class BitBangConnection {
             // attach a new one before the old one's close fires, and deleting
             // unconditionally would drop the live stream.
             if (this.streams.get(key) === s) this.streams.delete(key);
+            this.announceStreams();
         };
+    }
+
+    // What the device is offering, for the page's shim to bind elements to.
+    // Codec and rate ride along because a renderer has to be chosen before the
+    // first frame arrives, and neither the label nor the payload can say which
+    // one -- the label names the stream, not its type.
+    announceStreams() {
+        if (!this.streamPort) return;
+        this.streamPort.postMessage({
+            type: 'streams',
+            streams: [...this.streams.values()].map(s => ({
+                key: `${s.presentation}/${s.component}`,
+                presentation: s.presentation,
+                component: s.component,
+                codec: s.codec,
+                rate: s.rate,
+            })),
+        });
     }
 
     // The stream a caller means when it does not say. Bench and teardown want
@@ -561,25 +603,41 @@ class BitBangConnection {
             st.drawn = 0; st.dropped = 0; st.since = performance.now();
         }
 
-        // The device's page owns the canvas; forwarding the bytes keeps the
-        // rendering where the markup is.
+        // The renderer lives in the page, so this hands over bytes and stops.
+        // Nothing here knows what a JPEG is, and nothing on the other side
+        // knows what a chunk is.
         //
         // pts is relative to the device's boot, so it is only meaningful
         // against other frames from the same device. The consumer takes the
         // first one it sees as the origin -- which also means a device restart
         // is just a new origin rather than a discontinuity to handle.
-        // The stream name and codec ride along so a page can bind an element to
-        // a presentation and pick a decoder without asking anything else, and
-        // the component so it can tell two streams of one presentation apart.
         //
-        // No transfer list: BroadcastChannel.postMessage does not take one, so
-        // every frame is structured-cloned on its way out. One of the reasons
-        // this should become a MessagePort, which does -- see
-        // av-streaming-api.md. It used to pass one here, which read as if the
-        // buffer moved when it never did.
-        this.videoFrameChannel.postMessage(
-            { type: 'frame', data: frame.buffer, ptsMs: f.ptsMs, keyframe: f.keyframe,
-              stream: s.presentation, component: s.component, codec: s.codec });
+        // A tap for the harness, which is a page of its own and not the one the
+        // device served, so it cannot be on the other end of the port. Costs a
+        // copy of every frame, which is why it only runs under debug.
+        //
+        // Taken before the transfer below, not after: transferring detaches
+        // the buffer, and reading a detached one gives zero bytes rather than
+        // an error. A harness quietly receiving empty frames is a worse
+        // failure than the copy is a cost.
+        if (this.debug) {
+            if (!this.videoFrameChannel) {
+                this.videoFrameChannel = new BroadcastChannel('bitbang-video');
+            }
+            this.videoFrameChannel.postMessage(
+                { type: 'frame', data: frame.slice().buffer,
+                  ptsMs: f.ptsMs, keyframe: f.keyframe,
+                  stream: s.presentation, component: s.component, codec: s.codec });
+        }
+
+        // Transferred, not copied: ownership moves and the bytes do not. This
+        // has to be the last use of the buffer here, which it is.
+        if (this.streamPort) {
+            this.streamPort.postMessage(
+                { type: 'frame', key: `${s.presentation}/${s.component}`,
+                  data: frame.buffer, ptsMs: f.ptsMs, keyframe: f.keyframe },
+                [frame.buffer]);
+        }
     }
 
     // Benchmark accounting for messages arriving on the video channel. The
@@ -2976,7 +3034,14 @@ class BitBangConnection {
     // maxRetransmits 0, so a subscribe sent there can vanish and leave the
     // viewer silently blank. Named, so audio uses the same message.
     setStream(name, on) {
-        if (!name || !this.dataChannel || this.dataChannel.readyState !== 'open') return;
+        if (!name || !this.dataChannel || this.dataChannel.readyState !== 'open') {
+            // Silently dropping this is indistinguishable, from the device's
+            // side, from a page that never asked -- and the page has no way to
+            // know it was lost, so it never retries. Worth a line.
+            console.warn(`[Bootstrap] ${name} subscribe dropped: channel ` +
+                         `${this.dataChannel ? this.dataChannel.readyState : 'missing'}`);
+            return;
+        }
         try {
             this.dataChannel.send(this.createFrame(0, FLAG_SYN,
                 JSON.stringify({ type: 'stream', name, on: !!on })));
@@ -2985,6 +3050,53 @@ class BitBangConnection {
         } catch (e) {
             if (this.debug) console.warn('[Bootstrap] setStream failed', e);
         }
+    }
+
+    // Whether a name is the presentation half of a stream channel ("cam", when
+    // the device has cam/video) rather than a whole one ("cam/video").
+    isPresentation(name) {
+        if (name.indexOf('/') > 0) return false;
+        for (const s of this.streams.values()) {
+            if (s.presentation === name) return true;
+        }
+        return false;
+    }
+
+    // Hand the page one end of a port and tell it what the device offers.
+    //
+    // The other end is stream-shim.js, which the service worker prepended to
+    // this response. It renders; this side never learns what a codec is.
+    //
+    // postMessage into the iframe rather than a property on contentWindow,
+    // because a port has to be transferred and a property cannot transfer one.
+    // The shim installs its listener while the document is still parsing -- it
+    // is the first script in the response -- and this runs on load, so the
+    // handshake cannot be missed in that direction.
+    attachStreamPort(iframe) {
+        if (!iframe.contentWindow) return;
+        const chan = new MessageChannel();
+        // A previous page's port, if this is a navigation within the device.
+        // Closing it drops any frame still queued for a document that is gone.
+        if (this.streamPort) this.streamPort.close();
+        this.streamPort = chan.port1;
+        this.streamPort.onmessage = (e) => {
+            const msg = e.data;
+            if (!msg || msg.type !== 'subscribe') return;
+            // The shim asks for exactly the components it found an element for,
+            // which is the rule that keeps a device from sending what nobody is
+            // showing.
+            this.setStream(msg.name, msg.on !== false);
+        };
+        // Targeted rather than '*'. The device page is same-origin -- the
+        // service worker serves it from this origin, which is how
+        // contentDocument is readable at all -- so naming the origin costs
+        // nothing and means a frame that navigated somewhere else does not
+        // receive a port that can subscribe to a device.
+        iframe.contentWindow.postMessage({ type: 'bitbang-stream-port' },
+                                         location.origin, [chan.port2]);
+        // Channels usually open well before the page finishes loading, so the
+        // shim would otherwise wait for a device to declare something new.
+        this.announceStreams();
     }
 
     wireStreams(iframe) {
@@ -3001,14 +3113,22 @@ class BitBangConnection {
         // calls __bitbang.subscribe() itself; watching the document for
         // changes would be more code, permanently running, for a case a
         // load-time scan could not have served reliably anyway.
+        //
+        // A name that is the presentation of a stream channel is left to the
+        // shim, which subscribes per component once it knows which element can
+        // render which codec. Sending "cam" here as well would be a message
+        // the device has no stream for -- it ignores unknown names, but there
+        // is no reason to make it.
         const wanted = new Set();
         doc.querySelectorAll('[data-bitbang-stream]').forEach(el => {
             const n = el.getAttribute('data-bitbang-stream');
-            if (n) wanted.add(n);
+            if (n && !this.isPresentation(n)) wanted.add(n);
         });
         for (const n of wanted) {
             if (!this.subscribedStreams.has(n)) this.setStream(n, true);
         }
+
+        this.attachStreamPort(iframe);
 
         // Wire elements with data-bitbang-stream attribute
         doc.querySelectorAll('[data-bitbang-stream]').forEach(el => {

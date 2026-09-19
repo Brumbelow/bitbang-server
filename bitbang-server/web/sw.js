@@ -1366,7 +1366,17 @@ async function proxyToDevice(event) {
                                 + `<script>window.__bbSessionId=${jsonForScript(sessionId)};window.__bbJarKey=${jsonForScript(jarKey)};window.__bbDebug=${!!session?.debug};${cookieSync}</script>`
                                 + eruda
                                 + '<script src="/__bitbang__/xhr-shim.js"></script>'
-                                + '<script src="/__bitbang__/ws-shim.js"></script>';
+                                + '<script src="/__bitbang__/ws-shim.js"></script>'
+                                // Renders whatever the device streams, so a
+                                // device page is a <canvas> and an <audio>
+                                // rather than a decoder written in firmware.
+                                // Prepended, so its handshake listener is
+                                // installed before any of the page's own
+                                // script runs. It fetches a renderer per
+                                // codec, and only for codecs the page has an
+                                // element for, so a page that streams nothing
+                                // pays for this tag and no more.
+                                + '<script src="/__bitbang__/stream-shim.js"></script>';
                             controller.enqueue(new TextEncoder().encode(shims));
                         }
                     }

@@ -53,11 +53,18 @@ var stampInputs = []string{
 	"sw.js",
 	"ws-shim.js",
 	"xhr-shim.js",
+	"stream-shim.js",
 	// Temporary: leaves with config.html when the config page becomes a plugin.
 	"config.html",
 	"console.html",
 	"ota.html",
+	// The renderers. Temporary in the same sense: they move to a plugin of
+	// their own, which is not the one config.html goes to -- a renderer is a
+	// codec adapter, and a device sending mjpeg wants the mjpeg renderer
+	// while wanting nothing to do with any particular device's firmware.
 	"pcm-ring.js",
+	"render-mjpeg.js",
+	"render-ulaw.js",
 }
 
 // buildStamp hashes the on-disk bytes of every stamp input, with their
@@ -101,19 +108,28 @@ func serveStamped(w http.ResponseWriter, staticDir, name, stamp string) {
 // Anything else returns 404. A new browser-runtime asset has to be added here
 // or it 404s at load time with no other symptom.
 var allowedBitbangAssets = map[string]bool{
-	"sw.js":        true,
-	"bootstrap.js": true,
-	"ws-shim.js":   true,
-	"xhr-shim.js":  true,
-	"favicon.ico":  true, // handler internally maps this to favicon.png
+	"sw.js":          true,
+	"bootstrap.js":   true,
+	"ws-shim.js":     true,
+	"xhr-shim.js":    true,
+	"stream-shim.js": true, // renders whatever a device streams, in its page
+	"favicon.ico":    true, // handler internally maps this to favicon.png
 	// Temporary: goes away when a plugin serves its own assets.
 	"config.html":  true, // the device-settings meta-page shell
 	"console.html": true, // the device-console meta-page shell
 	"ota.html":     true, // the device-firmware meta-page shell
-	// An AudioWorklet module, so it needs a URL: addModule cannot take a
-	// string. Served here rather than embedded in a device page, because a
-	// renderer is a property of the codec and not of any one device.
-	"pcm-ring.js": true,
+	// The renderers, one per codec, fetched by the shim the first time a
+	// channel announces that codec. Served here rather than embedded in a
+	// device page, because rendering is a property of the codec and not of any
+	// one device -- an ESP32, a Pi and a Python process sending mjpeg all want
+	// this same file, and none of them should have to carry a copy.
+	//
+	// pcm-ring.js is a level below those: an AudioWorklet module, loaded by
+	// render-ulaw.js rather than by the shim, and it needs a URL of its own
+	// because addModule cannot take a string.
+	"pcm-ring.js":     true,
+	"render-mjpeg.js": true,
+	"render-ulaw.js":  true,
 }
 
 // Static returns an http.Handler that serves the signaling server's static

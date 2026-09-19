@@ -332,6 +332,16 @@ $('burst').onclick = () => {
 
 /* -- the device, when asked -------------------------------------------- */
 
+/* This is a tap, not the rendering path.
+ *
+ * Frames reach the device's own page over a MessagePort, which this page is
+ * not on the other end of -- it is a page of its own. bootstrap mirrors them
+ * onto a BroadcastChannel as well, but only in a debug session, because doing
+ * it always costs a copy of every frame for a tap nobody is usually reading.
+ *
+ * So live mode needs the device session opened with debug set. Without it the
+ * channel exists and stays silent, which looks exactly like a device sending
+ * nothing -- hence the warning below rather than a quiet zero. */
 function listenToDevice() {
     new BroadcastChannel('bitbang-video').onmessage = e => {
         const d = e.data;
@@ -342,6 +352,14 @@ function listenToDevice() {
         frames++;
         node.port.postMessage(pcm);
     };
+    const had = frames;
+    setTimeout(() => {
+        if (frames === had) {
+            $('ctxrate').textContent =
+                'no frames -- open the device session with debug set, ' +
+                'or the tap this reads is not running';
+        }
+    }, 3000);
 }
 
 $('listen').onclick = () => start().catch(e => {

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -15,15 +16,18 @@ func stampDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"bootstrap.html": "<html><!-- FRONT_PAGE --></html>",
-		"bootstrap.js":   "const BUILD = '" + buildPlaceholder + "';\n",
-		"sw.js":          "const BUILD = '" + buildPlaceholder + "';\n",
-		"ws-shim.js":     "// ws shim\n",
-		"xhr-shim.js":    "// xhr shim\n",
-		"config.html":    "<html><!-- settings --></html>",
-		"console.html":   "<html><!-- console --></html>",
-		"ota.html":       "<html><!-- firmware --></html>",
-		"pcm-ring.js":    "// pcm ring\n",
+		"bootstrap.html":  "<html><!-- FRONT_PAGE --></html>",
+		"bootstrap.js":    "const BUILD = '" + buildPlaceholder + "';\n",
+		"sw.js":           "const BUILD = '" + buildPlaceholder + "';\n",
+		"ws-shim.js":      "// ws shim\n",
+		"xhr-shim.js":     "// xhr shim\n",
+		"stream-shim.js":  "// stream shim\n",
+		"config.html":     "<html><!-- settings --></html>",
+		"console.html":    "<html><!-- console --></html>",
+		"ota.html":        "<html><!-- firmware --></html>",
+		"pcm-ring.js":     "// pcm ring\n",
+		"render-mjpeg.js": "// mjpeg\n",
+		"render-ulaw.js":  "// ulaw\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -146,6 +150,48 @@ func TestStampedAssetsAreNotCacheable(t *testing.T) {
 		got := serveAsset(t, dir, path).Header().Get("Cache-Control")
 		if !strings.Contains(got, "no-store") {
 			t.Errorf("%s: Cache-Control = %q, want no-store", path, got)
+		}
+	}
+}
+
+// Every asset the service worker injects into a device page has to be
+// servable, and every servable asset has to exist.
+//
+// This is the failure it exists for, and it has happened: a new shim is added,
+// its <script src> goes into sw.js, and allowedBitbangAssets is not updated.
+// The tag 404s inside an iframe, nothing renders, and there is no error
+// anywhere a person is looking. The same for a name in the whitelist whose
+// file was never added or was later renamed.
+//
+// Reads the real web/ rather than a fixture, because a fixture would agree
+// with whatever the test itself wrote.
+func TestInjectedScriptsAreServable(t *testing.T) {
+	web := filepath.Join("..", "..", "web")
+	sw, err := os.ReadFile(filepath.Join(web, "sw.js"))
+	if err != nil {
+		t.Skipf("no web/ beside the package: %v", err)
+	}
+
+	re := regexp.MustCompile(`<script src=\\?"/__bitbang__/([^"\\]+)`)
+	found := re.FindAllStringSubmatch(string(sw), -1)
+	if len(found) == 0 {
+		t.Fatal("no injected /__bitbang__/ script tags found in sw.js -- " +
+			"either the injection moved or this pattern stopped matching it")
+	}
+	for _, m := range found {
+		name := m[1]
+		if !allowedBitbangAssets[name] {
+			t.Errorf("sw.js injects %s, which allowedBitbangAssets does not serve: "+
+				"it will 404 inside the device page", name)
+		}
+	}
+
+	for name := range allowedBitbangAssets {
+		if name == "favicon.ico" {
+			continue // served from favicon.png
+		}
+		if _, err := os.Stat(filepath.Join(web, name)); err != nil {
+			t.Errorf("allowedBitbangAssets has %s, but web/ does not: %v", name, err)
 		}
 	}
 }
