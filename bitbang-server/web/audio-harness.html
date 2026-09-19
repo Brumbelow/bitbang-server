@@ -1,0 +1,288 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audio renderer harness</title>
+<!--
+  The renderer, built off the device.
+
+  The page that will eventually host this is a C string in the firmware, so
+  every edit there costs a rebuild and a flash. More to the point, the failures
+  worth testing are ones you would otherwise have to wait for: a clock a
+  fraction of a percent fast, one frame in a hundred lost, a 200 ms stall.
+  Here they are buttons.
+
+  Serve it, because addModule() needs a URL and file:// will not do:
+
+      cd bitbang-server/web && python3 -m http.server
+      then open http://localhost:8000/audio-harness.html
+
+  Source it from the device instead of the generator with ?live=1, opened
+  inside a device page's origin -- same BroadcastChannel bootstrap forwards
+  frames on. See av-streaming-api.md.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+            "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --accent: #3b82f6; --dim: #8a8a8e; --line: #8884;
+    --bad: #e5484d; --ok: #30a46c; --warn: #f5a623;
+    accent-color: var(--accent);
+  }
+  body { font:15px/1.6 var(--font); margin:0; padding:2rem 1.5rem; max-width:44rem; }
+  h1 { font-size:.8rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+       color:var(--dim); margin:0 0 1.25rem; }
+  h2 { font-size:.8rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+       color:var(--dim); margin:1.75rem 0 .6rem; }
+  button { font:inherit; color:inherit; background:none; cursor:pointer;
+    border:1px solid var(--line); border-radius:5px; padding:.35rem .9rem; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.go { border-color:var(--accent); color:var(--accent); }
+  label { display:inline-flex; align-items:center; gap:.4rem; margin-right:1.2rem; }
+  select, input[type=number] { font:inherit; color:inherit; background:Canvas;
+    border:1px solid var(--line); border-radius:5px; padding:.25rem .4rem; }
+  .row { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; margin:.5rem 0; }
+  table { border-collapse:collapse; font-variant-numeric:tabular-nums; margin-top:.5rem; }
+  td { padding:.15rem .9rem .15rem 0; }
+  td.k { color:var(--dim); }
+  td.v { font-family:var(--mono); }
+  /* The buffer level over time is the whole drift test: flat is correct,
+     a slope in either direction is the correction failing to hold. */
+  canvas { width:100%; height:120px; border:1px solid var(--line);
+           border-radius:6px; margin-top:.75rem; }
+  .note { font-size:.85rem; color:var(--dim); }
+  .bad { color:var(--bad); } .ok { color:var(--ok); } .warn { color:var(--warn); }
+</style>
+
+<h1>Audio renderer harness</h1>
+
+<div class="row">
+  <button id="listen" class="go">Listen</button>
+  <span class="note">the context will not start without a gesture</span>
+</div>
+
+<h2>Source</h2>
+<div class="row">
+  <label>rate
+    <select id="rate">
+      <option value="16000">16000 Hz, exact</option>
+      <option value="16000.8">16000.8 Hz, +50 ppm fast</option>
+      <option value="15999.2">15999.2 Hz, -50 ppm slow</option>
+      <option value="16008">16008 Hz, +500 ppm, exaggerated</option>
+    </select>
+  </label>
+  <label>signal
+    <select id="signal">
+      <option value="tone">440 Hz tone</option>
+      <option value="sweep">slow sweep</option>
+      <option value="noise">noise</option>
+    </select>
+  </label>
+</div>
+
+<h2>Faults</h2>
+<div class="row">
+  <label>drop 1 in
+    <input id="drop" type="number" value="0" min="0" max="1000" step="10" style="width:5rem">
+  </label>
+  <button id="stall">Stall 200 ms</button>
+  <button id="burst">Deliver 1 s at once</button>
+</div>
+
+<h2>State</h2>
+<table>
+  <tr><td class="k">buffer</td><td class="v" id="level">-</td></tr>
+  <tr><td class="k">correction</td><td class="v" id="corr">-</td></tr>
+  <tr><td class="k">step</td><td class="v" id="step">-</td></tr>
+  <tr><td class="k">underruns</td><td class="v" id="under">-</td></tr>
+  <tr><td class="k">overruns</td><td class="v" id="over">-</td></tr>
+  <tr><td class="k">resyncs</td><td class="v" id="resync">-</td></tr>
+  <tr><td class="k">frames in</td><td class="v" id="frames">-</td></tr>
+  <tr><td class="k">context rate</td><td class="v" id="ctxrate">-</td></tr>
+</table>
+<canvas id="plot" width="880" height="120"></canvas>
+<div class="note">buffer level against its target. Flat is the answer; a
+  steady slope means the correction is not holding.</div>
+
+<script>
+const DEVICE_RATE = 16000;
+const FRAME_MS = 60;
+const LIVE = new URLSearchParams(location.search).get('live') === '1';
+
+const $ = id => document.getElementById(id);
+
+/* -- u-law, the inverse of what the device does ----------------------- */
+
+const ULAW = new Float32Array(256);
+for (let u = 0; u < 256; u++) {
+    const v = ~u & 0xff;
+    let t = ((v & 0x0f) << 3) + 0x84;
+    t <<= (v & 0x70) >> 4;
+    ULAW[u] = ((v & 0x80) ? (0x84 - t) : (t - 0x84)) / 32768;
+}
+
+function encodeUlaw(x) {
+    let v = Math.max(-32635, Math.min(32635, Math.round(x * 32768)));
+    const sign = v < 0 ? 0x80 : 0;
+    if (v < 0) v = -v;
+    v += 0x84;
+    const exp = 31 - Math.clz32(v) - 7;
+    const mant = (v >> (exp + 3)) & 0x0f;
+    return (~(sign | (exp << 4) | mant)) & 0xff;
+}
+
+/* -- the renderer ------------------------------------------------------ */
+
+let ctx = null, node = null, frames = 0;
+const history = [];
+
+async function start() {
+    /* Ask for the device's rate. A browser that honors it makes the
+       resampler a copy; one that gives 44100 or 48000 makes the same loop
+       resample. Never assume 48000 -- macOS commonly runs 44.1. */
+    ctx = new AudioContext({ sampleRate: DEVICE_RATE });
+    await ctx.audioWorklet.addModule('pcm-ring.js');
+    await ctx.resume();
+
+    const step = DEVICE_RATE / ctx.sampleRate;
+    node = new AudioWorkletNode(ctx, 'pcm-ring', {
+        outputChannelCount: [1],
+        processorOptions: {
+            step,
+            capacity: Math.ceil(ctx.sampleRate * 2),
+            targetSamples: Math.ceil(ctx.sampleRate * 0.12),
+        },
+    });
+    node.connect(ctx.destination);
+    node.port.onmessage = e => show(e.data, step);
+
+    $('ctxrate').textContent = `${ctx.sampleRate} Hz, step ${step.toFixed(4)}`;
+    $('listen').disabled = true;
+
+    if (LIVE) listenToDevice(); else runGenerator();
+}
+
+function show(s, step) {
+    $('level').textContent =
+        `${s.level} samples, ${(s.level / ctx.sampleRate * 1000).toFixed(0)} ms ` +
+        `(target ${(s.target / ctx.sampleRate * 1000).toFixed(0)} ms)`;
+    $('corr').textContent = `${(s.correction * 100).toFixed(3)}%`;
+    $('step').textContent = (step * (1 + s.correction)).toFixed(6);
+    $('under').textContent = s.underruns;
+    $('under').className = 'v' + (s.underruns ? ' bad' : ' ok');
+    $('over').textContent = s.overruns;
+    $('over').className = 'v' + (s.overruns ? ' warn' : ' ok');
+    $('resync').textContent = s.resyncs;
+    $('resync').className = 'v' + (s.resyncs ? ' warn' : ' ok');
+    $('frames').textContent = frames;
+
+    history.push(s.level / s.target);
+    if (history.length > 880) history.shift();
+    plot(history);
+}
+
+function plot(h) {
+    const c = $('plot'), g = c.getContext('2d');
+    g.clearRect(0, 0, c.width, c.height);
+    /* The target line. Everything is drawn relative to it, so the shape is
+       readable whatever the absolute buffer size is. */
+    g.strokeStyle = '#8884';
+    g.beginPath(); g.moveTo(0, c.height / 2); g.lineTo(c.width, c.height / 2); g.stroke();
+    g.strokeStyle = '#3b82f6';
+    g.beginPath();
+    for (let i = 0; i < h.length; i++) {
+        /* Centre is target, top is 2x, bottom is empty. Clamped, because an
+           excursion that leaves the canvas is the one worth seeing. */
+        let y = c.height / 2 - (h[i] - 1) * (c.height / 2);
+        if (y < 1) y = 1; else if (y > c.height - 1) y = c.height - 1;
+        if (i === 0) g.moveTo(i, y); else g.lineTo(i, y);
+    }
+    g.stroke();
+}
+
+/* -- the generator ----------------------------------------------------- */
+
+function runGenerator() {
+    let phase = 0, sweep = 200, carry = 0, seq = 0;
+
+    setInterval(() => {
+        const rate = parseFloat($('rate').value);
+        /* Fractional samples carry between frames, so a rate of 16000.8
+           really is 16000.8 over time rather than 16000 with a rounding
+           error that happens to look like drift. */
+        const exact = rate * (FRAME_MS / 1000) + carry;
+        const count = Math.floor(exact);
+        carry = exact - count;
+
+        const bytes = new Uint8Array(count);
+        const kind = $('signal').value;
+        for (let i = 0; i < count; i++) {
+            let x;
+            if (kind === 'noise') {
+                x = (Math.random() * 2 - 1) * 0.2;
+            } else {
+                const f = kind === 'sweep' ? sweep : 440;
+                phase += 2 * Math.PI * f / rate;
+                if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+                x = Math.sin(phase) * 0.25;
+            }
+            bytes[i] = encodeUlaw(x);
+        }
+        if (kind === 'sweep') {
+            sweep *= 1.02;
+            if (sweep > 3000) sweep = 200;
+        }
+
+        seq++;
+        const drop = parseInt($('drop').value, 10);
+        if (drop > 0 && seq % drop === 0) return;   /* a frame that never arrives */
+        deliver(bytes);
+    }, FRAME_MS);
+}
+
+let stalled = false, held = [];
+
+function deliver(bytes) {
+    if (stalled) { held.push(bytes); return; }
+    frames++;
+    const pcm = new Float32Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) pcm[i] = ULAW[bytes[i]];
+    node.port.postMessage(pcm);
+}
+
+$('stall').onclick = () => {
+    /* Nothing arrives for 200 ms, then everything does. Both halves matter:
+       the gap tests the underrun path and the burst tests whether the
+       correction can shed the excess without a pitch anyone notices. */
+    stalled = true;
+    setTimeout(() => { stalled = false; const h = held; held = []; h.forEach(deliver); }, 200);
+};
+
+$('burst').onclick = () => {
+    const n = Math.round(DEVICE_RATE * 1);
+    const pcm = new Float32Array(n);
+    for (let i = 0; i < n; i++) pcm[i] = Math.sin(2 * Math.PI * 440 * i / DEVICE_RATE) * 0.25;
+    frames++;
+    node.port.postMessage(pcm);
+};
+
+/* -- the device, when asked -------------------------------------------- */
+
+function listenToDevice() {
+    new BroadcastChannel('bitbang-video').onmessage = e => {
+        const d = e.data;
+        if (d.type !== 'frame' || d.component !== 'audio') return;
+        const b = new Uint8Array(d.data);
+        const pcm = new Float32Array(b.length);
+        for (let i = 0; i < b.length; i++) pcm[i] = ULAW[b[i]];
+        frames++;
+        node.port.postMessage(pcm);
+    };
+}
+
+$('listen').onclick = () => start().catch(e => {
+    $('ctxrate').textContent = 'failed: ' + e.message;
+});
+</script>
