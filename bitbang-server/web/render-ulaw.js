@@ -129,10 +129,35 @@ window.BitBang.streams.register({
         });
         el.addEventListener('pause', () => info.setActive(false));
 
-        /* The element starts paused, so nothing is wanted yet. Said once here
-           rather than assumed, because the shim's default is to subscribe and
-           this is the renderer that does not want that. */
-        info.setActive(!el.paused);
+        /* Normally the element starts paused and nothing is wanted yet. Said
+           once here rather than assumed, because the shim's default is to
+           subscribe and this is the renderer that does not want that.
+         *
+         * The exception is coming back from a reconnect. Losing the channel
+         * unbinds this instance and calls stop(), which drops srcObject and
+         * closes the context -- and that pauses the element. So when the
+         * channel returns and a new instance is built, el.paused describes
+         * what the teardown did to the plumbing, not what the listener asked
+         * for, and reading it would silently strand someone who was listening
+         * the whole time. Observed exactly that: video re-subscribed on its
+         * own after a 20 s outage and audio stayed silent until pressed
+         * again.
+         *
+         * stop() records the answer while it is still true; this restores it.
+         * play() needs a gesture, and a page that reached this path has had
+         * one, so the browser's sticky activation carries it. */
+        if (el.__bbWasPlaying) {
+            el.__bbWasPlaying = false;
+            info.setActive(true);
+            el.play().catch(() => {
+                /* Refused for want of a gesture: leave it to the listener,
+                   who still has a play button, rather than sending audio
+                   nobody can hear. */
+                info.setActive(false);
+            });
+        } else {
+            info.setActive(!el.paused);
+        }
 
         /* Reused across frames. Frames are a constant 60 ms in practice, so
            this allocates once and then never. */
@@ -148,6 +173,9 @@ window.BitBang.streams.register({
             },
             stats() { return stats; },
             stop() {
+                /* Read first: both lines below pause the element, so after
+                   them this question can only be answered wrong. */
+                el.__bbWasPlaying = !el.paused;
                 el.srcObject = null;
                 ctx.close();
             },
