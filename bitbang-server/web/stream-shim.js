@@ -49,6 +49,47 @@
        camera, one of them paused, must not stop the other. */
     const bound = new Map();
 
+    /* One playback clock per presentation, in the device's own timebase.
+     *
+     * Audio plays continuously and cannot be hurried, so its position is the
+     * clock everything else is drawn against -- a dropped video frame at 20
+     * fps is close to invisible, 20 ms of missing audio is a click. The
+     * renderer that plays audio publishes where it has reached; renderers
+     * that draw read it and hold each frame until its moment arrives.
+     *
+     * It is keyed by presentation because that is the unit a page binds to:
+     * cam/video and cam/audio are two components of one thing and share a
+     * timebase. Two different cameras would each have their own.
+     *
+     * Empty until something publishes, which is what makes this opt-in. With
+     * no audio playing there is no clock, and a video renderer draws on
+     * arrival exactly as it always did. */
+    const clocks = new Map();
+
+    function clockFor(presentation) {
+        let c = clocks.get(presentation);
+        if (c === undefined) {
+            c = { ptsMs: NaN, at: 0, movedAt: 0 };
+            clocks.set(presentation, c);
+        }
+        return c;
+    }
+
+    /* How long a clock may stand still before it stops counting as one.
+     *
+     * A clock that is present but frozen is worse than no clock: every frame
+     * waits for a moment that never arrives, and the picture stops dead. That
+     * is exactly what a paused audio element does -- the ring keeps reporting,
+     * because the context is deliberately left running, but its position no
+     * longer moves.
+     *
+     * Pausing clears the clock outright, so this is for the cases nobody
+     * announces: an underrun, a stalled stream, a renderer that went away
+     * without saying. A second is long enough that a short gap still holds
+     * the picture in step, and short enough that a real outage lets video run
+     * free rather than freezing with it. */
+    const CLOCK_STALE_MS = 1000;
+
     let port = null;
     let known = [];
 
@@ -174,6 +215,39 @@
                         if (on) b.active.add(token);
                         else b.active.delete(token);
                         reconcile(s.key);
+                    },
+
+                    /* The presentation's playback clock. See `clocks`.
+                     *
+                     * get() interpolates with wall time since the last
+                     * publication, because the audio ring reports about eight
+                     * times a second and drawing 20 fps of video against a
+                     * value that coarse would step visibly. Between reports
+                     * the clock advances in real time, which is what it is
+                     * doing anyway. */
+                    clock: {
+                        set(ptsMs) {
+                            const c = clockFor(s.presentation);
+                            const now = performance.now();
+                            /* Only a changed position counts as movement.
+                               Republishing the same one is what a paused ring
+                               does, and it must not look like progress. */
+                            if (ptsMs !== c.ptsMs) {
+                                c.movedAt = now;
+                            }
+                            c.ptsMs = ptsMs;
+                            c.at = now;
+                        },
+                        get() {
+                            const c = clockFor(s.presentation);
+                            if (Number.isNaN(c.ptsMs)) {
+                                return NaN;
+                            }
+                            if (performance.now() - c.movedAt > CLOCK_STALE_MS) {
+                                return NaN;    /* stopped: draw on arrival */
+                            }
+                            return c.ptsMs + (performance.now() - c.at);
+                        },
                     },
                 });
 

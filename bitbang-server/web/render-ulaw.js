@@ -52,6 +52,16 @@ window.BitBang.streams.register({
                 step: rate / ctx.sampleRate,
                 deviceRate: rate,
                 capacity: rate * 2,
+                /* Half a second, where the ring's own default is 300 ms.
+                 *
+                 * Deeper than the arrival jitter strictly needs, because this
+                 * device still underruns at 300 under load, and an underrun
+                 * is a click while the extra buffer is only delay. Delay is
+                 * also no longer the cost it was: video is drawn against this
+                 * ring's position, so the picture waits with the sound rather
+                 * than running ahead of it. Raising one used to desynchronise
+                 * them; now it just moves both. */
+                targetSamples: Math.round(rate * 0.5),
             },
         });
 
@@ -72,10 +82,17 @@ window.BitBang.streams.register({
         let floor = Infinity, since = 0;
         node.port.onmessage = (e) => {
             stats = e.data;
-            if (!Number.isNaN(stats.playPts)) {
-                /* What moment is currently audible. Audio plays continuously,
-                   so its position is the clock any other stream would be
-                   selected against. Nothing consumes it yet. */
+            /* What moment is currently audible, published as the
+               presentation's clock. The video renderer draws against it,
+               which is what keeps the two in step.
+             *
+             * Only while actually playing. The context is left running when
+             * paused, so these reports keep arriving with the position frozen
+             * -- and republishing that would put the clock straight back a
+             * moment after the pause handler cleared it, freezing the picture
+             * until the staleness guard noticed a second later. */
+            if (!Number.isNaN(stats.playPts) && !el.paused) {
+                info.clock.set(stats.playPts);
                 el.__bbPlayPts = stats.playPts;
             }
 
@@ -127,7 +144,21 @@ window.BitBang.streams.register({
             if (ctx.state === 'suspended') ctx.resume();
             info.setActive(true);
         });
-        el.addEventListener('pause', () => info.setActive(false));
+        el.addEventListener('pause', () => {
+            info.setActive(false);
+            /* Withdraw the clock, do not merely stop advancing it.
+             *
+             * The context is deliberately left running while paused, so the
+             * ring keeps reporting -- with its position frozen. A frozen
+             * clock is worse than none: every video frame waits for a moment
+             * that never comes and the picture stops dead. Measured that way
+             * round: disabling audio froze the stream.
+             *
+             * Cleared here so the picture goes back to drawing on arrival the
+             * instant the listener pauses, rather than a second later when
+             * the shim's staleness guard would have caught it. */
+            info.clock.set(NaN);
+        });
 
         /* Normally the element starts paused and nothing is wanted yet. Said
            once here rather than assumed, because the shim's default is to
@@ -173,6 +204,9 @@ window.BitBang.streams.register({
             },
             stats() { return stats; },
             stop() {
+                /* Nothing is playing audio any more, so nothing should be
+                   holding frames for it. */
+                info.clock.set(NaN);
                 /* Read first: both lines below pause the element, so after
                    them this question can only be answered wrong. */
                 el.__bbWasPlaying = !el.paused;

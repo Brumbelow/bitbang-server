@@ -65,12 +65,22 @@ class PcmRing extends AudioWorkletProcessor {
            is what keeps it inaudible; proportional because drift is a rate
            and wants a rate correction, not a splice.
 
-           Asymmetric, because the two directions do not cost the same thing.
+           Symmetric, after an asymmetric version had the reasoning backwards.
 
-           Running *below* target risks an underrun, which is a click, and
-           slowing down barely helps anyway -- what refills a ring is the far
-           side sending, not this side reading gently. So that direction stays
-           at 0.5%, where it is inaudible.
+           That version held the refill direction at 0.5%, arguing that
+           slowing down barely helps because what refills a ring is the far
+           side sending rather than this side reading gently. Measured, that
+           is false exactly when the far side is sending slightly *less* than
+           nominal. The buffer was watched walking from 1050 ms down to zero
+           at 24 ms/s: 15 of that is this correction draining an overshoot,
+           and the remaining 9 is arrivals running about 0.9% under rate --
+           four or five lost frames a minute. Slowing playback 1.5% holds back
+           240 samples a second, comfortably more than that shortfall, so the
+           ring rides it out rather than reaching zero. Capped at 0.5% it
+           could not, and underran.
+
+           Consumption is the only half of the rate this side governs, and it
+           is worth using in both directions.
 
            Running *above* target costs only latency, and there is no reason
            to be gentle about giving that back. Measured against the device:
@@ -84,7 +94,7 @@ class PcmRing extends AudioWorkletProcessor {
            something anyone picks up without a reference to compare against,
            and it only runs while there is an overshoot to remove. It drains
            240 samples a second: the same 180 ms comes back in 12 s. */
-        this.maxCorrection = o.maxCorrection || 0.005;
+        this.maxCorrection = o.maxCorrection || 0.015;
         this.maxDrain = o.maxDrain || 0.015;
 
         /* How hard the loop pulls per unit of relative error, which used to
@@ -225,6 +235,14 @@ class PcmRing extends AudioWorkletProcessor {
         if (!out) return true;
         const n = out.length;
 
+        /* Primes to the full target, not to some fraction of it.
+         *
+         * Priming shallower looks like it would shorten each underrun, and it
+         * does not: a gap ends with a burst rather than a trickle, so the ring
+         * reaches either threshold within about 50 ms of the data resuming.
+         * Tried at 40% and the measured silence was the same, while the cost
+         * was real -- playback resumed holding 200 ms of cushion right after
+         * the event that had just shown the link was unstable. */
         if (this.priming) {
             if (this.level < this.target) {
                 out.fill(0);
@@ -247,6 +265,23 @@ class PcmRing extends AudioWorkletProcessor {
             /* The read position is meaningless once the data under it is
                gone; starting clean avoids interpolating across the gap. */
             this.pos = 0;
+            /* Drop the remainder too, which is what makes the anchor in
+               onFrame work.
+             *
+             * This branch does not consume, so level stops at whatever was
+             * left -- under one quantum, but not zero. onFrame re-anchors
+             * playPts only when level is exactly zero, so a fragment left
+             * here means the next frame after a gap does not re-anchor, and
+             * the clock resumes from where it stopped instead of from live.
+             *
+             * That is invisible while nothing reads the clock, and fatal once
+             * video does: pause, wait, play, and the clock returns far behind
+             * every frame in hand, so none is ever due and the picture
+             * freezes. Found exactly that way -- on, off, on.
+             *
+             * What is discarded is a sub-quantum fragment stranded behind a
+             * gap, with nothing to be contiguous with. */
+            this.level = 0;
             this.report(n);
             return true;
         }

@@ -58,22 +58,96 @@ window.BitBang.streams.register({
 
         if (tag === 'canvas') {
             const ctx = el.getContext('2d');
+
+            const paint = (b) => {
+                /* Follow the sender: a resolution change arrives as a
+                   differently sized frame and nothing else. Setting width or
+                   height clears the canvas, so only on a real change. */
+                if (el.width !== b.width || el.height !== b.height) {
+                    el.width = b.width;
+                    el.height = b.height;
+                }
+                ctx.drawImage(b, 0, 0);
+                b.close();
+            };
+
+            /* Frames waiting for their moment, oldest first.
+             *
+             * Only used while something is publishing a clock, which in
+             * practice means while audio is playing. With no clock this stays
+             * empty and frames are drawn the instant they arrive. */
+            const pending = [];
+            let decoding = false;
+            let raf = 0;
+
+            /* Enough for the deepest audio buffer with room over: at 20 fps
+               and half a second of audio, about ten frames are in flight. The
+               cap is a backstop against a clock that stops advancing, not a
+               working limit -- the bytes are compressed, so thirty frames is
+               a few hundred kilobytes rather than thirty decoded bitmaps. */
+            const MAX_PENDING = 30;
+
+            const tick = () => {
+                raf = requestAnimationFrame(tick);
+
+                const now = info.clock.get();
+                if (Number.isNaN(now) || decoding || pending.length === 0) {
+                    return;
+                }
+
+                /* The newest frame that is due. Anything older than it is
+                   already past and drawing it would step backwards, so the
+                   whole run goes at once. */
+                let last = -1;
+                for (let i = 0; i < pending.length; i++) {
+                    if (pending[i].ptsMs <= now) last = i;
+                    else break;
+                }
+                if (last < 0) {
+                    return;     /* the clock has not reached the next frame */
+                }
+
+                const f = pending[last];
+                pending.splice(0, last + 1);
+
+                /* One decode at a time. The previous attempt at this ran
+                   decodes concurrently and spliced the queue from each
+                   completion, which reordered frames and read as jitter --
+                   the bug that made synchronised video look worse than
+                   unsynchronised. One consumer, one decode in flight. */
+                decoding = true;
+                createImageBitmap(new Blob([f.bytes], { type: 'image/jpeg' }))
+                    .then(b => { paint(b); decoding = false; })
+                    .catch(() => { decoding = false; });
+            };
+
             return {
-                frame(bytes) {
-                    draw(bytes, b => {
-                        /* Follow the sender: a resolution change arrives as a
-                           differently sized frame and nothing else. Setting
-                           width or height clears the canvas, so only on a
-                           real change. */
-                        if (el.width !== b.width || el.height !== b.height) {
-                            el.width = b.width;
-                            el.height = b.height;
-                        }
-                        ctx.drawImage(b, 0, 0);
-                        b.close();
-                    });
+                frame(bytes, meta) {
+                    /* No clock means nothing is playing audio, so there is
+                       nothing to wait for: draw on arrival, which is both the
+                       lowest latency and what this did before. */
+                    if (Number.isNaN(info.clock.get())) {
+                        draw(bytes, paint);
+                        return;
+                    }
+
+                    if (raf === 0) {
+                        raf = requestAnimationFrame(tick);
+                    }
+                    /* Copied because the buffer is the transferred frame and
+                       the caller is free to reuse it once this returns. */
+                    pending.push({ bytes: bytes.slice(), ptsMs: meta.ptsMs });
+                    if (pending.length > MAX_PENDING) {
+                        pending.splice(0, pending.length - MAX_PENDING);
+                    }
                 },
-                stop() {},
+                stop() {
+                    if (raf !== 0) {
+                        cancelAnimationFrame(raf);
+                        raf = 0;
+                    }
+                    pending.length = 0;
+                },
             };
         }
 
