@@ -282,6 +282,24 @@ class PcmRing extends AudioWorkletProcessor {
              * What is discarded is a sub-quantum fragment stranded behind a
              * gap, with nothing to be contiguous with. */
             this.level = 0;
+            /* And stop claiming a position, because there no longer is one.
+             *
+             * Nothing is audible during a gap, so the last value is not where
+             * playback has reached -- it is where playback stopped. Keeping
+             * it means reporting a stale clock for as long as the gap lasts,
+             * and the far side cannot tell that from a live one.
+             *
+             * Resuming audio is the case that showed it. The element is
+             * unpaused the moment play is pressed, but the first frame is a
+             * subscribe message and a round trip away -- a few hundred
+             * milliseconds during which this reported the position from
+             * before the pause. Video read that, held every live frame as not
+             * yet due, and drew whatever stale frame it still had that was
+             * older than the resurrected clock.
+             *
+             * NaN until onFrame anchors again, which it does on the next
+             * frame to arrive, since level is now zero. */
+            this.playPts = NaN;
             this.report(n);
             return true;
         }

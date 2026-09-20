@@ -91,7 +91,20 @@ window.BitBang.streams.register({
                 raf = requestAnimationFrame(tick);
 
                 const now = info.clock.get();
-                if (Number.isNaN(now) || decoding || pending.length === 0) {
+                if (Number.isNaN(now)) {
+                    /* No clock, so nothing held here will ever come due, and
+                       arrivals are being drawn immediately instead. Holding
+                       them costs a stale frame the moment a clock comes back:
+                       every one of them is older than the position audio
+                       resumes at, so all of them read as due at once and the
+                       newest gets painted over whatever is live.
+
+                       Observed on re-enabling audio. Dropping them here is
+                       free -- the display already has something newer. */
+                    pending.length = 0;
+                    return;
+                }
+                if (decoding || pending.length === 0) {
                     return;
                 }
 
