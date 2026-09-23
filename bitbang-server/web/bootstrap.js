@@ -515,6 +515,19 @@ class BitBangConnection {
         this.flow.resetStream(streamId, new Error('stream complete'));
     }
 
+    // Once both sides have finished, the service worker owes a responseClosed.
+    // If it never comes (a response body nobody reads to the end), drop the
+    // stream after a grace period rather than holding it for the session.
+    _armRequestReaper(streamId) {
+        const req = this.pendingRequests.get(streamId);
+        if (!req || req.cleanupTimeout) return;
+        req.cleanupTimeout = setTimeout(() => {
+            if (this.pendingRequests.get(streamId) !== req) return;
+            this.pendingRequests.delete(streamId);
+            this.flow.resetStream(streamId, new Error('stream complete'));
+        }, 30000);
+    }
+
     async _waitForDataChannel(streamId) {
         while (this.dataChannel?.readyState === 'open'
             && this.dataChannel.bufferedAmount > SWSP_BUFFER_LIMIT) {
@@ -1153,6 +1166,16 @@ class BitBangConnection {
         // response headers arrive (SYN). After that we rely on FIN / data
         // channel close to signal end -- inactivity is normal during streaming
         // when the consumer (e.g. video player) backpressures the channel.
+        //
+        // A request with a body gets no timer of its own. Its body moves at
+        // whatever rate the peer grants credit, as the CLI's own sender does,
+        // and the response cannot come before the peer has drained what is
+        // still queued at FIN. A peer that is gone is reported by
+        // _queueStreamFrame rejecting, or by _teardownTransport resetting the
+        // stream when the reconnect loop tears down the old transport. The one
+        // exception is a body with nothing in it (a POST or DELETE without a
+        // payload): the device has the whole request once the FIN is out, so
+        // bodyEnd times it like a GET.
         let timeout;
         const resetTimeout = () => {
             clearTimeout(timeout);
@@ -1162,7 +1185,7 @@ class BitBangConnection {
             const req = this.pendingRequests.get(streamId);
             if (req) req.timeout = timeout;
         };
-        resetTimeout();
+        if (!hasBody) resetTimeout();
 
         this.pendingRequests.set(streamId, {
             responsePort,
@@ -1253,7 +1276,6 @@ class BitBangConnection {
                         const now = Date.now();
                         if (now - lastProgress > 100) {
                             lastProgress = now;
-                            resetTimeout();
                             this.progressChannel.postMessage({
                                 type: 'uploadProgress', loaded: bytesSent, total: contentLength
                             });
@@ -1268,6 +1290,15 @@ class BitBangConnection {
                             if (req) {
                                 req.localFinished = true;
                                 this._finishRequest(streamId);
+                                if (!this.pendingRequests.has(streamId)) return;
+                                if (req.remoteFinished) {
+                                    this._armRequestReaper(streamId);
+                                } else if (bytesSent === 0 && !req.headersReceived) {
+                                    // Nothing was queued ahead of the FIN, so the
+                                    // device has the whole request now: time it
+                                    // like a bodiless GET.
+                                    resetTimeout();
+                                }
                             }
                         } catch (e) {
                             return failUpload(e.message || 'Connection lost');
@@ -2256,17 +2287,11 @@ class BitBangConnection {
 
                 req.responsePort.postMessage({ type: 'done' });
                 req.remoteFinished = true;
-                req.cleanupTimeout = setTimeout(() => {
-                    const current = this.pendingRequests.get(frame.streamId);
-                    if (!current) return;
-                    if (current.localFinished) {
-                        this.pendingRequests.delete(frame.streamId);
-                        this.flow.resetStream(frame.streamId, new Error('stream complete'));
-                    } else {
-                        this._resetStream(
-                            frame.streamId, 'timeout', 'request body did not finish', true);
-                    }
-                }, 30000);
+                // A device may answer before it has read the whole body (a
+                // 401, a 413, a redirect). The listener keeps draining and
+                // granting credit, so the body finishes on its own and
+                // bodyEnd arms the reaper then.
+                if (req.localFinished) this._armRequestReaper(frame.streamId);
             } else if (!(frame.flags & FLAG_SYN) && frame.payload.byteLength > 0) {
                 // Data chunk - use transferable to avoid copy
                 req.bytesReceived += frame.payload.byteLength;

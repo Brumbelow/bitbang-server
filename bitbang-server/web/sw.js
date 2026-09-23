@@ -1227,15 +1227,43 @@ async function proxyToDevice(event) {
     // Install a router before reading the request body so an ack cannot race
     // the response handler setup. Non-ack messages are retained until the
     // response promise below is ready to consume them.
-    const uploadAcks = new SWSPUpload.AckGate(30000);
+    //
+    // No deadline on the gate: an upload runs at whatever rate the peer grants
+    // credit, as it did before flow control. A dead peer reaches here when
+    // bootstrap.js resets the stream, on the channel closing under a queued
+    // frame or when the reconnect loop tears the transport down. The 30 s
+    // request timeout further down is for bodiless requests only, as it
+    // always was.
+    const uploadAcks = new SWSPUpload.AckGate();
     let bodyReader = null;
     let responseHandler = null;
+    let sawHeaders = false;
+    let answered = false;
     const pendingResponseMessages = [];
     channel.port1.onmessage = (msg) => {
         if (msg.data?.type === 'bodyAck') {
             if (uploadAcks.acknowledge(msg.data.seq)) return;
         }
+        if (msg.data?.type === 'headers') sawHeaders = true;
+        if (msg.data?.type === 'done') answered = sawHeaders;
         if (msg.data?.type === 'error') {
+            if (answered) {
+                // The device answered in full before the upload was done and
+                // the stream has since been reset -- a listener that stops
+                // reading a body once it has responded, say. What is left of
+                // the body has nowhere to go; the answer does. End the upload
+                // quietly and keep the answer. The same holds once the body
+                // is out, and for a GET: every chunk precedes done, so a
+                // reset this late could only cut short an answer that is
+                // already complete.
+                const stop = new Error('answered before the upload finished');
+                stop.answered = true;
+                uploadAcks.fail(stop);
+                if (bodyReader) {
+                    Promise.resolve(bodyReader.cancel(stop)).catch(() => {});
+                }
+                return;
+            }
             const error = uploadAcks.fail(new Error(msg.data.message || 'upload failed'));
             if (bodyReader) {
                 Promise.resolve(bodyReader.cancel(error)).catch(() => {});
@@ -1283,10 +1311,14 @@ async function proxyToDevice(event) {
             uploadAcks.throwIfFailed();
             channel.port1.postMessage({ type: 'bodyEnd' });
         } catch (e) {
-            channel.port1.postMessage({
-                type: 'cancel', message: e.message || 'upload failed',
-            });
-            return new Response(`BitBang: ${e.message || 'upload failed'}`, { status: 500 });
+            // A reset that came after the device had answered in full is not
+            // a failed request: fall through and deliver the answer.
+            if (!e.answered) {
+                channel.port1.postMessage({
+                    type: 'cancel', message: e.message || 'upload failed',
+                });
+                return new Response(`BitBang: ${e.message || 'upload failed'}`, { status: 500 });
+            }
         }
     }
 

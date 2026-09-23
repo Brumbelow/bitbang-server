@@ -24,7 +24,7 @@ test('request body chunks are copied into bounded transferable slices', () => {
 });
 
 test('terminal errors reject both current and future acknowledgements', async () => {
-    const gate = new AckGate(1000);
+    const gate = new AckGate();
     const current = gate.wait(1);
 
     gate.fail(new Error('peer reset'));
@@ -34,7 +34,7 @@ test('terminal errors reject both current and future acknowledgements', async ()
 });
 
 test('an error latched between chunks rejects the next acknowledgement immediately', async () => {
-    const gate = new AckGate(1000);
+    const gate = new AckGate();
     const first = gate.wait(1);
     assert.equal(gate.acknowledge(1), true);
     await first;
@@ -42,4 +42,19 @@ test('an error latched between chunks rejects the next acknowledgement immediate
     gate.fail(new Error('stream closed'));
 
     await assert.rejects(gate.wait(2), /stream closed/);
+});
+
+test('an unacknowledged slice never times out on its own', async (t) => {
+    const timers = t.mock.method(globalThis, 'setTimeout');
+    const gate = new AckGate();
+    let outcome = 'pending';
+    const wait = gate.wait(1);
+    wait.then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(timers.mock.callCount(), 0);
+    assert.equal(outcome, 'pending');
+
+    assert.equal(gate.acknowledge(1), true);
+    await wait;
 });

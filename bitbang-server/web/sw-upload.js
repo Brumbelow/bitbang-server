@@ -21,9 +21,13 @@
         return bytes.slice(offset, Math.min(offset + MAX_SLICE_BYTES, bytes.byteLength));
     }
 
+    // Serializes body slices behind the peer's acknowledgements and latches
+    // the first terminal error. There is deliberately no deadline: a slice is
+    // acknowledged once the peer's credit lets it through, and on a slow link
+    // that takes as long as it takes. A peer that is gone closes the data
+    // channel, and bootstrap.js reports that here as an error.
     class AckGate {
-        constructor(timeoutMs = 30000) {
-            this.timeoutMs = timeoutMs;
+        constructor() {
             this.pending = null;
             this.error = null;
         }
@@ -34,10 +38,7 @@
                 return Promise.reject(new Error('upload acknowledgement already pending'));
             }
             return new Promise((resolve, reject) => {
-                const timer = setTimeout(() => {
-                    this.fail(new Error('upload backpressure timeout'));
-                }, this.timeoutMs);
-                this.pending = { seq, resolve, reject, timer };
+                this.pending = { seq, resolve, reject };
             });
         }
 
@@ -45,7 +46,6 @@
             if (!this.pending || seq !== this.pending.seq) return false;
             const pending = this.pending;
             this.pending = null;
-            clearTimeout(pending.timer);
             pending.resolve();
             return true;
         }
@@ -57,7 +57,6 @@
             if (this.pending) {
                 const pending = this.pending;
                 this.pending = null;
-                clearTimeout(pending.timer);
                 pending.reject(this.error);
             }
             return this.error;
